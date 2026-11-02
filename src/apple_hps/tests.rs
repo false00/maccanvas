@@ -142,9 +142,9 @@ fn encrypted_apple_peer_decodes_real_hevc_and_preserves_input_and_hello_gates() 
     let video_socket = UdpSocket::bind(("127.0.0.2", port + 1)).unwrap();
     let _control_socket = UdpSocket::bind(("127.0.0.2", port)).unwrap();
     let (observed, received) = mpsc::channel();
+    let private = RsaPrivateKey::new(&mut rand::rngs::OsRng, 2048).unwrap();
+    let public = private.to_public_key().to_public_key_der().unwrap();
     let server = thread::spawn(move || {
-        let private = RsaPrivateKey::new(&mut rand::rngs::OsRng, 2048).unwrap();
-        let public = private.to_public_key().to_public_key_der().unwrap();
         let (mut socket, peer) = listener.accept().unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(15)))
