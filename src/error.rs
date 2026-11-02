@@ -18,6 +18,14 @@ pub enum Error {
     Update(String),
     #[error("Update recovery: {0}")]
     UpdateRecovery(String),
+    #[error("Security audit: {0}")]
+    Audit(String),
+    #[error("Clipboard: {0}")]
+    Clipboard(String),
+    #[error("File transfer: {0}")]
+    Transfer(String),
+    #[error("Operation cancelled")]
+    Cancelled,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -2,13 +2,16 @@
 param(
     [Parameter(Mandatory = $true)][int]$ProcessId,
     [int]$Port,
-    [ValidateSet('connect', 'bounds', 'fullscreen', 'exit-fullscreen', 'disconnect', 'focus', 'toggle-sidebar', 'telemetry', 'quality', 'manual-quality', 'close-quality', 'show-macs', 'new', 'saved-login-check')][string]$Action = 'bounds'
+    [int]$SshPort,
+    [string]$SshFingerprint,
+    [ValidateSet('connect', 'bounds', 'fullscreen', 'exit-fullscreen', 'disconnect', 'focus', 'toggle-sidebar', 'telemetry', 'quality', 'manual-quality', 'close-quality', 'show-macs', 'new', 'saved-login-check', 'panels', 'ssh-dialogs')][string]$Action = 'bounds'
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 $process = Get-Process -Id $ProcessId
-$window = [Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
+$viewerHandle = $process.MainWindowHandle
+$window = [Windows.Automation.AutomationElement]::FromHandle($viewerHandle)
 function Find-FixtureElement([string]$Name, $Type) {
     $nameCondition = [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty, $Name)
     if ($null -ne $Type) {
@@ -24,6 +27,142 @@ function Find-FixtureElement([string]$Name, $Type) {
     return $element
 }
 switch ($Action) {
+    'ssh-dialogs' {
+        if ($SshPort -le 0 -or -not $SshFingerprint) { throw 'An owned SSH fixture endpoint and fingerprint are required.' }
+        Add-Type @'
+using System;
+using System.ComponentModel;
+using System.Text;
+using System.Runtime.InteropServices;
+public static class MacCanvasOwnedDialogInput {
+    [StructLayout(LayoutKind.Sequential)] struct Point { public int X, Y; }
+    delegate bool WindowCallback(IntPtr h, IntPtr data);
+    [DllImport("user32.dll")] static extern bool EnumWindows(WindowCallback callback, IntPtr data);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetWindowText(IntPtr h, StringBuilder value, int length);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr h, uint command);
+    [DllImport("user32.dll", SetLastError=true)] public static extern bool PostMessage(IntPtr h, uint message, IntPtr w, IntPtr l);
+    [DllImport("user32.dll", SetLastError=true)] static extern bool ScreenToClient(IntPtr h, ref Point p);
+    [DllImport("user32.dll", SetLastError=true)] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+    public static IntPtr Find(int processId, IntPtr owner, string title) {
+        IntPtr found = IntPtr.Zero;
+        EnumWindows((h, ignored) => {
+            uint pid;
+            GetWindowThreadProcessId(h, out pid);
+            if (IsWindowVisible(h) && (pid == processId || GetWindow(h, 4) == owner)) {
+                var name = new StringBuilder(512);
+                GetWindowText(h, name, name.Capacity);
+                if (name.ToString() == title) { found = h; return false; }
+            }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+    public static string Describe(int processId, IntPtr owner) {
+        var result = new StringBuilder();
+        EnumWindows((h, ignored) => {
+            uint pid;
+            GetWindowThreadProcessId(h, out pid);
+            if (IsWindowVisible(h) && (pid == processId || GetWindow(h, 4) == owner)) {
+                var name = new StringBuilder(512);
+                GetWindowText(h, name, name.Capacity);
+                result.Append("[").Append(h).Append(": ").Append(name).Append("] ");
+            }
+            return true;
+        }, IntPtr.Zero);
+        return result.ToString();
+    }
+    public static void Click(IntPtr h, int x, int y) {
+        var old = SetThreadDpiAwarenessContext(new IntPtr(-4));
+        if (old == IntPtr.Zero) throw new Win32Exception();
+        try {
+            var p = new Point { X=x, Y=y };
+            if (!ScreenToClient(h, ref p)) throw new Win32Exception();
+            var position = new IntPtr((p.Y << 16) | (p.X & 65535));
+            if (!PostMessage(h, 0x0200, IntPtr.Zero, position) ||
+                !PostMessage(h, 0x0201, new IntPtr(1), position) ||
+                !PostMessage(h, 0x0202, IntPtr.Zero, position)) throw new Win32Exception();
+        } finally { SetThreadDpiAwarenessContext(old); }
+    }
+}
+'@
+        function Cancel-OwnedPicker([string]$ButtonName, [string]$DialogTitle) {
+            $button = Find-FixtureElement $ButtonName ([Windows.Automation.ControlType]::Button)
+            $bounds = $button.Current.BoundingRectangle
+            $owner = $viewerHandle
+            [MacCanvasOwnedDialogInput]::Click($owner, [int]($bounds.X + $bounds.Width / 2), [int]($bounds.Y + $bounds.Height / 2))
+            $deadline = [DateTime]::UtcNow.AddSeconds(10)
+            do {
+                $dialog = [MacCanvasOwnedDialogInput]::Find($ProcessId, $owner, $DialogTitle)
+                if ($dialog -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 50 }
+            } while ($dialog -eq [IntPtr]::Zero -and [DateTime]::UtcNow -lt $deadline)
+            if ($dialog -eq [IntPtr]::Zero) {
+                $names = [MacCanvasOwnedDialogInput]::Describe($ProcessId, $owner)
+                throw "Owned Windows file dialog did not open: $DialogTitle. Owned windows: $names; button bounds: $bounds"
+            }
+            if (-not [MacCanvasOwnedDialogInput]::PostMessage($dialog, 0x10, [IntPtr]::Zero, [IntPtr]::Zero)) {
+                throw 'Cannot cancel the owned native file picker.'
+            }
+            $deadline = [DateTime]::UtcNow.AddSeconds(5)
+            do {
+                Start-Sleep -Milliseconds 50
+                $dialog = [MacCanvasOwnedDialogInput]::Find($ProcessId, $owner, $DialogTitle)
+            } while ($dialog -ne [IntPtr]::Zero -and [DateTime]::UtcNow -lt $deadline)
+            if ($dialog -ne [IntPtr]::Zero) { throw 'The owned file picker did not close.' }
+        }
+        (Find-FixtureElement 'Files and SSH clipboard' ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+        foreach ($entry in @(
+            @('SSH port', "$SshPort"), @('SSH Mac username', 'fixture'),
+            @('SSH Mac password', 'FixturePassword-DoNotPutInLogs')
+        )) {
+            (Find-FixtureElement $entry[0] ([Windows.Automation.ControlType]::Edit)).
+                GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).SetValue($entry[1])
+        }
+        (Find-FixtureElement 'Connect securely' ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+        $fingerprint = Find-FixtureElement 'SSH SHA-256 fingerprint' ([Windows.Automation.ControlType]::Edit)
+        $observed = $fingerprint.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).Current.Value
+        if ($observed -ne $SshFingerprint) { throw 'The visible fingerprint is not the owned SSH fixture key.' }
+        (Find-FixtureElement 'Trust key & continue' ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+        $null = Find-FixtureElement 'Receive source.txt' ([Windows.Automation.ControlType]::Button)
+        Cancel-OwnedPicker 'Send a file...' 'Send a file to this Mac folder'
+        Cancel-OwnedPicker 'Receive source.txt' 'Receive a new file - existing files are not replaced'
+        (Find-FixtureElement 'Disconnect SSH' ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+        (Find-FixtureElement 'Done' ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+    }
+    'panels' {
+        (Find-FixtureElement 'About MacCanvas' ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+        $null = Find-FixtureElement 'GitHub profile' ([Windows.Automation.ControlType]::Button)
+        $null = Find-FixtureElement 'curl.red' ([Windows.Automation.ControlType]::Button)
+        $null = Find-FixtureElement 'GPL-3.0 license' ([Windows.Automation.ControlType]::Button)
+        $elements = $window.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition)
+        $names = @($elements | ForEach-Object { $_.Current.Name })
+        if (-not ($names -match 'Built by Juan Ortega')) { throw 'About is missing the public author information.' }
+        if (-not ($names -match '^Built: \d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC')) { throw 'About is missing its UTC build timestamp.' }
+        if (-not ($names -match '^Source: [0-9a-f]{40}')) { throw 'About is missing the full source revision.' }
+        $null = Find-FixtureElement 'Target: x86_64-pc-windows-msvc' ([Windows.Automation.ControlType]::Text)
+        (Find-FixtureElement 'Done' ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+        (Find-FixtureElement 'Clipboard sharing' ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+        $null = Find-FixtureElement 'Share plain-text clipboard over VNC' ([Windows.Automation.ControlType]::CheckBox)
+        $null = Find-FixtureElement 'Encrypted SSH clipboard' ([Windows.Automation.ControlType]::Button)
+        (Find-FixtureElement 'Done' ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+        (Find-FixtureElement 'Files and SSH clipboard' ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+        $null = Find-FixtureElement 'SSH port' ([Windows.Automation.ControlType]::Edit)
+        $password = Find-FixtureElement 'SSH Mac password' ([Windows.Automation.ControlType]::Edit)
+        if (-not $password.Current.IsPassword) { throw 'Manual SSH password field is not protected.' }
+        (Find-FixtureElement 'Done' ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+    }
     'toggle-sidebar' {
         (Find-FixtureElement 'Toggle connections sidebar' ([Windows.Automation.ControlType]::Button)).
             GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()

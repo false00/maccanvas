@@ -208,6 +208,7 @@ pub fn handshake_with_settings(
 
 pub enum Message {
     Update { changed: bool },
+    Clipboard(crate::clipboard::Packet),
     Other,
 }
 
@@ -229,6 +230,14 @@ impl Decoder {
     }
 
     pub fn read_message(&mut self, reader: &mut impl Read) -> Result<Message> {
+        self.read_message_with_clipboard(reader, || false)
+    }
+
+    pub fn read_message_with_clipboard(
+        &mut self,
+        reader: &mut impl Read,
+        shared: impl Fn() -> bool,
+    ) -> Result<Message> {
         match byte(reader)? {
             0 => self.update(reader),
             1 => {
@@ -242,12 +251,9 @@ impl Decoder {
             3 => {
                 skip(reader, 3)?;
                 let length = u32_be(reader)? as i32;
-                let length = length.unsigned_abs() as usize;
-                if length > 1024 * 1024 {
-                    return Err(Error::Protocol("Clipboard message is too large".into()));
-                }
-                skip(reader, length)?;
-                Ok(Message::Other)
+                Ok(Message::Clipboard(
+                    crate::clipboard::read_packet_with_sharing(reader, length, shared())?,
+                ))
             }
             _ => Err(Error::Protocol("Unsupported server message".into())),
         }

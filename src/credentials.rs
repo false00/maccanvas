@@ -22,9 +22,11 @@ use windows_future::IAsyncOperation;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
+    audit::{self, Level, Scope},
     auth::Credentials,
     error::{Error, Result},
 };
+use serde_json::json;
 
 pub trait CredentialStore {
     fn load(&self, profile: Uuid) -> Result<Credentials>;
@@ -52,7 +54,85 @@ pub fn resolve(
             consent.verify()?;
             store.load(profile)
         }
+
         CredentialSource::Manual(credentials) => Ok(credentials),
+    }
+}
+
+pub struct AuditedConsent<'a> {
+    pub scope: &'a Scope,
+    pub window: isize,
+}
+
+impl ConsentVerifier for AuditedConsent<'_> {
+    fn verify(&self) -> Result<()> {
+        self.scope.critical(
+            "security.consent.requested",
+            Level::Info,
+            json!({"security.mechanism": "windows_hello"}),
+        )?;
+        let result = WindowsHello {
+            window: self.window,
+        }
+        .verify();
+        outcome(self.scope, "security.consent.completed", result)
+    }
+}
+
+pub struct AuditedVault<'a> {
+    pub scope: &'a Scope,
+}
+
+fn outcome<T>(scope: &Scope, name: &'static str, result: Result<T>) -> Result<T> {
+    match &result {
+        Ok(_) => scope.critical(name, Level::Info, json!({"event.outcome": "success"}))?,
+        Err(error) => {
+            let mut attributes = audit::error_attributes(error);
+            attributes["event.outcome"] = json!("failure");
+            scope.critical(name, Level::Warn, attributes)?;
+        }
+    }
+    result
+}
+
+impl CredentialStore for AuditedVault<'_> {
+    fn load(&self, profile: Uuid) -> Result<Credentials> {
+        self.scope.critical(
+            "credential.read.requested",
+            Level::Info,
+            json!({"profile.id": profile}),
+        )?;
+        outcome(
+            self.scope,
+            "credential.read.completed",
+            WindowsVault.load(profile),
+        )
+    }
+
+    fn save(&self, profile: Uuid, credentials: &Credentials) -> Result<()> {
+        self.scope.critical(
+            "credential.save.requested",
+            Level::Info,
+            json!({"profile.id": profile}),
+        )?;
+        outcome(
+            self.scope,
+            "credential.save.completed",
+            WindowsVault.save(profile, credentials),
+        )
+    }
+
+    fn delete(&self, profile: Uuid) -> Result<()> {
+        self.scope.critical(
+            "credential.delete.requested",
+            Level::Info,
+            json!({"profile.id": profile}),
+        )?;
+        outcome(
+            self.scope,
+            "credential.delete.completed",
+            WindowsVault.delete(profile),
+        )
     }
 }
 

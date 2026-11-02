@@ -1,3 +1,5 @@
+mod files_ui;
+
 use std::{
     cell::RefCell,
     collections::HashMap,
@@ -9,6 +11,7 @@ use std::{
 };
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use serde_json::json;
 use slint::{
     ComponentHandle, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel,
     language::{PointerEventButton, PointerEventKind},
@@ -16,13 +19,15 @@ use slint::{
 use uuid::Uuid;
 
 use maccanvas::{
+    audit::{Level, Scope},
     auth::Credentials,
-    credentials::{CredentialSource, CredentialStore, WindowsVault},
+    clipboard::native,
+    credentials::{AuditedVault, CredentialSource, CredentialStore},
     error::{Error, Result},
     framebuffer::Framebuffer,
     geometry::{Extent, Viewport},
     input::{self, Command},
-    profiles::{AuthMode, Profile, Settings},
+    profiles::{self, AuthMode, Profile, Settings},
     render::{Job, Renderer},
     session::{Event, Frames, Request, Session},
     streaming::{Encoding, StreamSettings, encoding_name, raw_estimate},
@@ -36,8 +41,17 @@ use crate::{App, CodecGuide, Machine, TrafficBar};
 struct State {
     settings: Settings,
     path: PathBuf,
+    restart_data_directory: Option<PathBuf>,
     selected: Option<usize>,
     session: Option<Session>,
+    connection_profile: Option<Profile>,
+    files: files_ui::Files,
+    retired: Vec<Session>,
+    audit: Scope,
+    audit_reported: bool,
+    network_logged: Instant,
+    clipboard: native::Watcher,
+    pending_clipboard: Option<(u32, zeroize::Zeroizing<String>)>,
     generation: u64,
     frames: Frames,
     frame: Option<Arc<Framebuffer>>,
@@ -59,6 +73,27 @@ struct State {
 }
 
 impl State {
+    fn persist(&self) -> Result<()> {
+        self.audit.critical(
+            "configuration.save.requested",
+            Level::Info,
+            json!({"configuration.file.path":self.path}),
+        )?;
+        if let Err(error) = self.settings.save(&self.path) {
+            self.audit.critical(
+                "configuration.save.failed",
+                Level::Error,
+                maccanvas::audit::error_attributes(&error),
+            )?;
+            return Err(error);
+        }
+        self.audit.event("configuration.saved", Level::Info, json!({
+            "profile.count":self.settings.profiles.len(), "ui.sidebar_open":self.settings.sidebar_open,
+            "ui.show_fps":self.settings.show_fps, "input.ctrl_as_command":self.settings.ctrl_as_command,
+            "rfb.streaming":self.settings.streaming,
+        }))
+    }
+
     fn send(&self, command: Command) -> Result<()> {
         self.session
             .as_ref()
@@ -252,7 +287,7 @@ fn preferences(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
     state.settings.ctrl_as_command = app.get_ctrl_as_command();
     state.settings.sidebar_open = app.get_sidebar_open();
     state.settings.show_fps = app.get_show_fps();
-    state.settings.save(&state.path)
+    state.persist()
 }
 
 fn refresh_layout(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
@@ -308,16 +343,32 @@ fn disconnect(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
         state.monitor = Monitor::new(Instant::now());
         state.frame_number = 0;
         state.last_displayed_frame = 0;
+        state.connection_profile = None;
+        state.files.stop(app);
+        state.clipboard = native::Watcher::default();
+        state.pending_clipboard = None;
         state
             .frames
             .lock()
             .map_err(|_| Error::Display("Frame queue is unavailable".into()))?
             .take();
-        let close = session.map_or(Ok(()), |session| session.close());
+        let close = if let Some(session) = session {
+            let recorded =
+                session
+                    .scope()
+                    .critical("session.disconnect.requested", Level::Info, json!({}));
+            let close = session.close();
+            state.retired.push(session);
+            recorded.and(close)
+        } else {
+            Ok(())
+        };
         release.and(close)
     };
     app.set_connected(false);
     app.set_connecting(false);
+    app.set_clipboard_open(false);
+    app.set_files_open(false);
     app.set_frame_image(slint::Image::default());
     app.set_status("Disconnected".into());
     app.set_desktop_description("".into());
@@ -328,6 +379,62 @@ fn disconnect(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
         vec![TrafficBar::default(); telemetry::HISTORY],
     ))));
     result
+}
+
+fn paste_windows(app: &App, state: &mut State) -> Result<()> {
+    let owner = window_handle(app)?;
+    if let Some((sequence, text)) = state.clipboard.paste(owner)? {
+        let session = state
+            .session
+            .as_ref()
+            .ok_or_else(|| Error::Clipboard("Connect to your Mac first".into()))?;
+        session.send_clipboard(text)?;
+        state.clipboard.sent(sequence);
+    }
+    Ok(())
+}
+
+fn tick_clipboard(app: &App, state: &mut State) -> Result<()> {
+    let Some(session) = &state.session else {
+        return Ok(());
+    };
+    app.set_clipboard_mode(
+        if session.clipboard_utf8() {
+            "UTF-8 negotiated: Unicode plain text is available."
+        } else {
+            "Standard VNC: Latin-1 text only. Use SSH for other Unicode characters."
+        }
+        .into(),
+    );
+    if !state.settings.clipboard_enabled {
+        return Ok(());
+    }
+    if let Some(text) = session.take_clipboard()? {
+        state.pending_clipboard = Some((native::sequence(), text));
+    }
+    let owner = window_handle(app)?;
+    if !native::foreground(owner) || !app.get_canvas_focused() || app.get_modal_open() {
+        return Ok(());
+    }
+    if let Some((sequence, text)) = state.pending_clipboard.take() {
+        if sequence != native::sequence() {
+            session.scope().event(
+                "clipboard.superseded",
+                Level::Info,
+                json!({"clipboard.reason":"windows_clipboard_changed"}),
+            )?;
+        } else {
+            state.clipboard.receive(owner, &text)?;
+            session.scope().event(
+                "clipboard.applied",
+                Level::Info,
+                json!({
+                    "clipboard.direction":"mac_to_windows", "clipboard.text_bytes":text.len(),
+                }),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn stream_form(app: &App, settings: StreamSettings) {
@@ -487,14 +594,11 @@ fn tick_updates(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
                 app.set_update_installing(false);
                 match result {
                     Ok(executable) => {
-                        let directory = state.path.parent().ok_or_else(|| {
-                            Error::Configuration("Settings directory is unavailable".into())
-                        })?;
-                        match std::process::Command::new(executable)
-                            .arg("--data-dir")
-                            .arg(directory)
-                            .spawn()
-                        {
+                        let mut command = std::process::Command::new(executable);
+                        if let Some(directory) = &state.restart_data_directory {
+                            command.arg("--data-dir").arg(directory);
+                        }
+                        match command.spawn() {
                             Ok(_) => slint::quit_event_loop()
                                 .map_err(|error| Error::Update(error.to_string()))?,
                             Err(error) => {
@@ -597,14 +701,12 @@ pub fn run(
     data_directory: Option<PathBuf>,
     preview_theme: Option<bool>,
     preview_update: bool,
+    audit: Scope,
 ) -> Result<()> {
+    let restart_data_directory = data_directory.clone();
     let directory = match data_directory {
         Some(directory) => directory,
-        None => dirs::data_local_dir()
-            .ok_or_else(|| {
-                Error::Configuration("Windows did not return a local app-data folder".into())
-            })?
-            .join("MacCanvas"),
+        None => profiles::default_directory()?,
     };
     let path = directory.join("settings.json");
     let settings = Settings::load(&path)?;
@@ -618,15 +720,22 @@ pub fn run(
     app.set_ctrl_as_command(settings.ctrl_as_command);
     app.set_sidebar_open(settings.sidebar_open || settings.profiles.is_empty());
     app.set_show_fps(settings.show_fps);
+    app.set_clipboard_shared(settings.clipboard_enabled);
     app.set_editor_open(settings.profiles.is_empty());
     app.set_app_version(maccanvas::VERSION.into());
+    app.set_build_date(maccanvas::BUILD_UTC.into());
+    app.set_build_revision(maccanvas::REVISION.into());
+    app.set_build_target(maccanvas::TARGET.into());
+    app.set_build_compiler(maccanvas::RUSTC.into());
+    app.set_author_name(maccanvas::AUTHOR.into());
+    app.set_log_path(audit.audit().path().to_string_lossy().as_ref().into());
     let mut updater = Updater::new();
     #[cfg(debug_assertions)]
     if preview_update {
         updater.preview_available()?;
     }
     if preview_theme.is_none() && !(cfg!(debug_assertions) && preview_update) {
-        updater.check();
+        updater.check(&audit)?;
     } else {
         app.set_update_status("Checks for updates on every launch.".into());
     }
@@ -641,8 +750,17 @@ pub fn run(
     let state = Rc::new(RefCell::new(State {
         settings,
         path,
+        restart_data_directory,
         selected: None,
         session: None,
+        connection_profile: None,
+        files: files_ui::Files::default(),
+        retired: Vec::new(),
+        audit,
+        audit_reported: false,
+        network_logged: Instant::now(),
+        clipboard: native::Watcher::default(),
+        pending_clipboard: None,
         generation: 0,
         frames: Arc::new(Mutex::new(None)),
         frame: None,
@@ -678,6 +796,9 @@ pub fn run(
                 return Err(Error::Protocol("A connection is already active".into()));
             }
             let profile = profile_from_form(&app, &state)?;
+            if state.retired.len() >= 8 {
+                return Err(Error::Protocol("Wait for the previous connections to finish closing".into()));
+            }
             let source = if app.get_use_saved() {
                 CredentialSource::Saved
             } else {
@@ -694,7 +815,14 @@ pub fn run(
             state.monitor = Monitor::new(Instant::now());
             state.frame_number = 0;
             state.last_displayed_frame = 0;
+            state.clipboard = native::Watcher::default();
+            state.pending_clipboard = None;
+            state.network_logged = Instant::now();
+            state.files.reset_network();
+            state.connection_profile = Some(profile.clone());
             let request = Request {
+                audit: state.audit.child(json!({"profile.id":profile.id, "server.address":profile.host, "server.port":profile.port})),
+                clipboard: state.settings.clipboard_enabled,
                 profile,
                 credentials: source,
                 streaming: state.settings.streaming,
@@ -706,7 +834,7 @@ pub fn run(
                 request,
                 events.clone(),
                 state.frames.clone(),
-            ));
+            )?);
             Ok(())
         })();
         app.set_password("".into());
@@ -729,7 +857,11 @@ pub fn run(
             app.set_update_banner(true);
             return;
         }
-        state.updater.check();
+        let audit = state.audit.clone();
+        if let Err(error) = state.updater.check(&audit) {
+            notify(&app, error);
+            return;
+        }
         app.set_update_checking(state.updater.checking);
         app.set_update_status("Checking the latest official release...".into());
     });
@@ -739,13 +871,14 @@ pub fn run(
         let Some(app) = weak.upgrade() else { return };
         let result = (|| -> Result<()> {
             let mut state = update_state.borrow_mut();
-            if state.session.is_some() {
+            if state.session.is_some() || state.files.active() {
                 return Err(Error::Update(
-                    "Disconnect from the Mac before updating and restarting".into(),
+                    "Disconnect from the Mac and wait for SSH cleanup before updating and restarting".into(),
                 ));
             }
-            state.settings.save(&state.path)?;
-            state.updater.install()
+            state.persist()?;
+            let audit = state.audit.clone();
+            state.updater.install(&audit)
         })();
         match result {
             Ok(()) => {
@@ -763,6 +896,101 @@ pub fn run(
     app.on_dismiss_update(move || {
         if let Some(app) = weak.upgrade() {
             app.set_update_banner(false);
+        }
+    });
+    let weak = app.as_weak();
+    let about_state = state.clone();
+    app.on_about_link(move |index| {
+        if let Some(app) = weak.upgrade() {
+            let result = (|| -> Result<()> {
+                about_state.borrow().audit.event(
+                    "ui.about.link_opened",
+                    Level::Info,
+                    json!({"ui.link.index":index}),
+                )?;
+                maccanvas::links::open_about_link(index)
+            })();
+            if let Err(error) = result {
+                notify(&app, error);
+            }
+        }
+    });
+    let weak = app.as_weak();
+    let log_state = state.clone();
+    app.on_open_logs(move || {
+        if let Some(app) = weak.upgrade() {
+            let result = (|| -> Result<()> {
+                let state = log_state.borrow();
+                let path = state.audit.audit().path();
+                let audit = state.audit.clone();
+                drop(state);
+                let recorded = audit.event("audit.folder.open_requested", Level::Info, json!({}));
+                let opened = maccanvas::links::open_directory(
+                    path.parent()
+                        .ok_or_else(|| Error::Audit("Missing audit directory".into()))?,
+                );
+                opened.and(recorded)
+            })();
+            if let Err(error) = result {
+                notify(&app, error);
+            }
+        }
+    });
+    let weak = app.as_weak();
+    let clipboard_state = state.clone();
+    app.on_clipboard_changed(move || {
+        if let Some(app) = weak.upgrade() {
+            let result = (|| -> Result<()> {
+                let mut state = clipboard_state.borrow_mut();
+                let enabled = app.get_clipboard_shared();
+                if let Some(session) = &state.session {
+                    session.share_clipboard(enabled)?;
+                }
+                state.settings.clipboard_enabled = enabled;
+                state.pending_clipboard = None;
+                state.clipboard = native::Watcher::default();
+                state.persist()
+            })();
+            if let Err(error) = result {
+                notify(&app, error);
+            }
+        }
+    });
+    let weak = app.as_weak();
+    let paste_state = state.clone();
+    app.on_paste_windows_text(move || {
+        if let Some(app) = weak.upgrade() {
+            let result = (|| -> Result<()> {
+                let mut state = paste_state.borrow_mut();
+                paste_windows(&app, &mut state)?;
+                state.release()?;
+                for command in [
+                    Command::Key {
+                        keysym: input::COMMAND,
+                        down: true,
+                    },
+                    Command::Key {
+                        keysym: u32::from(b'v'),
+                        down: true,
+                    },
+                    Command::Key {
+                        keysym: u32::from(b'v'),
+                        down: false,
+                    },
+                    Command::Key {
+                        keysym: input::COMMAND,
+                        down: false,
+                    },
+                ] {
+                    state.send(command)?;
+                }
+                app.set_clipboard_open(false);
+                app.invoke_focus_canvas();
+                Ok(())
+            })();
+            if let Err(error) = result {
+                notify(&app, error);
+            }
         }
     });
     let close_state = state.clone();
@@ -844,7 +1072,7 @@ pub fn run(
                 session.send(Command::Configure(settings))?;
             }
             state.settings.streaming = settings;
-            state.settings.save(&state.path)?;
+            state.persist()?;
             Ok(settings)
         })();
         match result {
@@ -875,7 +1103,7 @@ pub fn run(
                 state.settings.profiles.push(profile);
                 state.selected = Some(state.settings.profiles.len() - 1);
             }
-            state.settings.save(&state.path)
+            state.persist()
         })();
         match result {
             Ok(()) => {
@@ -895,10 +1123,16 @@ pub fn run(
                 .selected
                 .ok_or_else(|| Error::Configuration("Select a machine first".into()))?;
             let id = state.settings.profiles[index].id;
-            WindowsVault.delete(id)?;
+            (AuditedVault {
+                scope: &state.audit,
+            })
+            .delete(id)?;
             state.settings.profiles.remove(index);
             state.selected = None;
-            state.settings.save(&state.path)
+            state
+                .audit
+                .critical("profile.removed", Level::Info, json!({"profile.id":id}))?;
+            state.persist()
         })();
         match result {
             Ok(()) => {
@@ -1055,12 +1289,20 @@ pub fn run(
         let Some(app) = weak.upgrade() else {
             return false;
         };
-        if !app.get_connected() || app.get_quality_open() || app.get_help_open() {
+        if !app.get_connected() || app.get_modal_open() {
             return false;
         }
         let result = (|| -> Result<()> {
             let mut state = key_state.borrow_mut();
             state.flush_pointer()?;
+            if down
+                && state.settings.clipboard_enabled
+                && (event.modifiers.meta || (event.modifiers.control && app.get_ctrl_as_command()))
+                && !event.modifiers.alt
+                && matches!(event.text.as_str(), "v" | "V" | "\u{16}")
+            {
+                paste_windows(&app, &mut state)?;
+            }
             let modifiers = [
                 event.modifiers.shift,
                 event.modifiers.control && !app.get_ctrl_as_command(),
@@ -1108,6 +1350,7 @@ pub fn run(
         }
         true
     });
+    files_ui::wire(&app, state.clone());
     let timer = slint::Timer::default();
     let weak = app.as_weak();
     let timer_state = state.clone();
@@ -1131,6 +1374,7 @@ pub fn run(
                     } => {
                         let saved = {
                             let mut state = timer_state.borrow_mut();
+                            state.connection_profile = Some(profile.clone());
                             if let Some(index) = state
                                 .settings
                                 .profiles
@@ -1143,7 +1387,7 @@ pub fn run(
                                 state.settings.profiles.push(profile.clone());
                                 state.selected = Some(state.settings.profiles.len() - 1);
                             }
-                            state.settings.save(&state.path)
+                            state.persist()
                         };
                         app.set_connecting(false);
                         app.set_connected(true);
@@ -1169,6 +1413,25 @@ pub fn run(
                 }
             }
             let result = (|| -> Result<()> {
+                {
+                    let mut state = timer_state.borrow_mut();
+                    while let Some(index) = state.retired.iter().position(Session::is_finished) {
+                        state.retired.remove(index).finish()?;
+                    }
+                    if let Some(error) = state.audit.audit().failure()
+                        && !state.audit_reported
+                    {
+                        state.audit_reported = true;
+                        let closed = state.session.as_ref().map(Session::close).transpose();
+                        state.files.stop(&app);
+                        let mut message = format!("Security logging failed. Connections are disabled until MacCanvas is restarted. {error}");
+                        if let Err(error) = closed { message.push_str(&format!(" Socket cleanup also reported: {error}")); }
+                        app.set_audit_error(message.clone().into());
+                        notify(&app, Error::Audit(message));
+                    }
+                }
+                tick_clipboard(&app, &mut timer_state.borrow_mut())?;
+                files_ui::tick(&app,&mut timer_state.borrow_mut())?;
                 let frame = timer_state
                     .borrow()
                     .frames
@@ -1239,7 +1502,11 @@ pub fn run(
                     app.set_active_encoding(
                         encoding_name(counters.encoding.load(Ordering::Relaxed)).into(),
                     );
-                    if let Some(sample) = state.monitor.sample(&counters, now) {
+                    let (ssh_received,ssh_sent) = state.files.network();
+                    let combined = telemetry::Counters::default();
+                    combined.received.store(counters.received.load(Ordering::Relaxed).saturating_add(ssh_received),Ordering::Relaxed);
+                    combined.sent.store(counters.sent.load(Ordering::Relaxed).saturating_add(ssh_sent),Ordering::Relaxed);
+                    if let Some(sample) = state.monitor.sample(&combined, now) {
                         app.set_download_rate(telemetry::rate(sample.download_bps).into());
                         app.set_upload_rate(telemetry::rate(sample.upload_bps).into());
                         app.set_fps_text(format!("{:.0} FPS", sample.fps).into());
@@ -1250,6 +1517,20 @@ pub fn run(
                             .map(|(download, upload)| TrafficBar { download, upload })
                             .collect::<Vec<_>>();
                         app.set_traffic(ModelRc::from(Rc::new(VecModel::from(bars))));
+                        if now.saturating_duration_since(state.network_logged) >= Duration::from_secs(60) {
+                            if state.session.is_some() {
+                                state.audit.event("application.network.summary", Level::Info, json!({
+                                    "network.protocol.name":"rfb+ssh",
+                                    "vnc.session.generation":state.generation,
+                                    "network.io.received":combined.received.load(Ordering::Relaxed),
+                                    "network.io.sent":combined.sent.load(Ordering::Relaxed),
+                                    "network.receive.bits_per_second":sample.download_bps,
+                                    "network.send.bits_per_second":sample.upload_bps,
+                                    "rfb.displayed.fps":sample.fps, "rfb.encoding":counters.encoding.load(Ordering::Relaxed),
+                                }))?;
+                            }
+                            state.network_logged = now;
+                        }
                     }
                 }
                 Ok(())
@@ -1261,8 +1542,13 @@ pub fn run(
     );
     app.run()
         .map_err(|error| Error::Display(error.to_string()))?;
+    state.borrow_mut().files.stop(&app);
     if let Some(session) = state.borrow_mut().session.take() {
-        session.close()?;
+        session.finish()?;
+    }
+    state.borrow_mut().files.finish(&app)?;
+    for session in std::mem::take(&mut state.borrow_mut().retired) {
+        session.finish()?;
     }
     Ok(())
 }

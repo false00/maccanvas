@@ -18,7 +18,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  mac-clipboard:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+      - name: Verify the native macOS Unicode clipboard helpers
+        run: python3 scripts/test_macos_clipboard.py
   release:
+    needs: mac-clipboard
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -36,6 +45,8 @@ jobs:
           cargo fmt --all -- --check
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --all-targets --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --test windows_clipboard --locked -- --ignored --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo clippy --all-targets --locked -- -D warnings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

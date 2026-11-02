@@ -1,11 +1,23 @@
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const BUILD_UTC: &str = env!("MACCANVAS_BUILD_UTC");
+pub const BUILD_CLOCK: &str = env!("MACCANVAS_BUILD_CLOCK");
+pub const REVISION: &str = env!("MACCANVAS_REVISION");
+pub const TARGET: &str = env!("MACCANVAS_TARGET");
+pub const RUSTC: &str = env!("MACCANVAS_RUSTC");
+pub const AUTHOR: &str = "Juan Ortega";
+pub const AUTHOR_GITHUB: &str = "https://github.com/false00";
+pub const REPOSITORY: &str = "https://github.com/false00/maccanvas";
 
+pub mod audit;
 pub mod auth;
+pub mod clipboard;
 pub mod credentials;
 pub mod error;
+pub mod files;
 pub mod framebuffer;
 pub mod geometry;
 pub mod input;
+pub mod links;
 pub mod profiles;
 pub mod protocol;
 pub mod render;

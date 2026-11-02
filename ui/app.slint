@@ -1,5 +1,8 @@
 import { LineEdit, ComboBox, ScrollView, Palette } from "std-widgets.slint";
 import { GlassTheme, GlassPanel, Button, CheckBox, Slider } from "glass.slint";
+import { AboutOverlay } from "about.slint";
+import { ClipboardOverlay } from "clipboard.slint";
+import { FilesOverlay, FileRow } from "files.slint";
 
 export struct Machine { name: string, detail: string, saved: bool }
 export struct TrafficBar { download: float, upload: float }
@@ -77,6 +80,40 @@ export component App inherits Window {
     in property <bool> immersive: false;
     in property <bool> pulse: false;
     in property <string> app-version;
+    in property <string> build-date;
+    in property <string> build-revision;
+    in property <string> build-target;
+    in property <string> build-compiler;
+    in property <string> author-name;
+    in property <string> log-path;
+    in property <string> audit-error;
+    in-out property <bool> about-open: false;
+    in-out property <bool> clipboard-open: false;
+    in-out property <bool> clipboard-shared: false;
+    in property <string> clipboard-mode: "Standard VNC: Latin-1 compatibility mode.";
+    in-out property <bool> files-open: false;
+    in property <string> files-host;
+    in-out property <string> files-port: "22";
+    in-out property <string> files-username;
+    in-out property <string> files-password;
+    in property <bool> files-has-saved;
+    in-out property <bool> files-use-saved;
+    in property <bool> files-connected;
+    in property <bool> files-connecting;
+    in property <bool> files-busy;
+    in property <bool> files-key-pending;
+    in property <string> files-fingerprint;
+    in property <string> files-key-algorithm;
+    in property <string> files-key-command;
+    in-out property <string> files-path;
+    in-out property <string> files-upload-name;
+    in property <[FileRow]> file-entries;
+    in property <string> files-status;
+    in property <string> files-error;
+    in property <string> files-progress-label;
+    in property <float> files-progress;
+    out property <bool> modal-open: quality-open || help-open || about-open || clipboard-open || files-open || update-installing;
+    out property <bool> canvas-focused: remote-focus.has-focus;
     in property <bool> update-checking: false;
     in property <bool> update-available: false;
     in property <bool> update-installing: false;
@@ -137,6 +174,22 @@ export component App inherits Window {
     callback check-updates();
     callback install-update();
     callback dismiss-update();
+    callback about-link(int);
+    callback open-logs();
+    callback clipboard-changed();
+    callback paste-windows-text();
+    callback open-files();
+    callback files-close();
+    callback files-connect();
+    callback files-disconnect();
+    callback files-approve(bool);
+    callback files-browse();
+    callback files-up();
+    callback files-entry(int);
+    callback files-upload();
+    callback files-cancel();
+    callback files-copy-text();
+    callback files-send-text();
 
     init => {
         Palette.color-scheme = root.dark-theme ? ColorScheme.dark : ColorScheme.light;
@@ -155,6 +208,7 @@ export component App inherits Window {
     changed encoding-index => { root.quality-changed(); }
     changed machine-filter => { root.filter-machines(); }
     changed use-saved => { root.username = ""; root.password = ""; }
+    changed files-use-saved => { root.files-username = ""; root.files-password = ""; }
     focus-canvas => { remote-focus.focus(); }
 
     background: root.dark-theme ? #000000 : #f2f2f7;
@@ -164,6 +218,8 @@ export component App inherits Window {
     property <color> ink: GlassTheme.ink;
     property <color> accent: GlassTheme.accent;
     property <color> selection: root.dark-theme ? #0a84ff1f : #007aff0c;
+    FocusScope {
+        enabled: !root.modal-open;
     VerticalLayout {
         spacing: root.immersive ? 0px : 12px;
         padding: root.immersive ? 0px : 12px;
@@ -186,8 +242,11 @@ export component App inherits Window {
                 }
                 Rectangle { horizontal-stretch: 1; background: transparent; }
                 Button { text: "Quality"; icon: @image-url("../assets/tune.svg"); accessible-label: "Stream quality"; clicked => { root.quality-open = true; root.release-input(); } }
-                Button { text: "Refresh"; icon: @image-url("../assets/refresh.svg"); quiet: true; enabled: root.connected; clicked => { root.refresh-desktop(); } }
-                Button { text: "Full screen"; icon: @image-url("../assets/fullscreen.svg"); quiet: true; enabled: root.connected; clicked => { root.fullscreen-requested(); } }
+                Button { icon: @image-url("../assets/clipboard.svg"); accessible-label: "Clipboard sharing"; quiet: true; enabled: root.connected; clicked => { root.clipboard-open = true; root.release-input(); } }
+                Button { text: "Files"; icon: @image-url("../assets/folder.svg"); accessible-label: "Files and SSH clipboard"; quiet: !root.files-connected; enabled: root.connected; clicked => { root.open-files(); } }
+                Button { icon: @image-url("../assets/info.svg"); accessible-label: "About MacCanvas"; quiet: true; clicked => { root.about-open = true; root.release-input(); } }
+                Button { accessible-label: "Refresh"; icon: @image-url("../assets/refresh.svg"); quiet: true; enabled: root.connected; clicked => { root.refresh-desktop(); } }
+                Button { accessible-label: "Full screen"; icon: @image-url("../assets/fullscreen.svg"); quiet: true; enabled: root.connected; clicked => { root.fullscreen-requested(); } }
                 Button { text: root.connecting ? "Cancel" : "Disconnect"; enabled: root.connected || root.connecting; clicked => { root.disconnect-requested(); } }
             }
         }
@@ -345,6 +404,11 @@ export component App inherits Window {
             }
             VerticalLayout {
                 spacing: 10px;
+                if root.audit-error != "" : Rectangle {
+                    background: root.dark-theme ? #ff453a19 : #ff3b3010;
+                    border-radius: 8px; min-height: 60px;
+                    Text { x: 12px; y: 8px; width: parent.width - 24px; height: parent.height - 16px; text: root.audit-error; color: root.ink; wrap: word-wrap; font-size: 12px; }
+                }
                 if root.error-text != "" : Rectangle {
                     background: root.dark-theme ? #ff453a19 : #ff3b3010;
                     border-radius: 8px; min-height: 54px;
@@ -381,7 +445,7 @@ export component App inherits Window {
                         source: root.frame-image; image-fit: fill;
                     }
                     remote-focus := FocusScope {
-                        enabled: root.connected && !root.quality-open && !root.help-open && !root.update-installing;
+                        enabled: root.connected && !root.modal-open;
                         key-pressed(event) => { return root.keyboard-event(event, true) ? EventResult.accept : EventResult.reject; }
                         key-released(event) => { return root.keyboard-event(event, false) ? EventResult.accept : EventResult.reject; }
                         changed has-focus => { if !self.has-focus { root.release-input(); } }
@@ -441,6 +505,7 @@ export component App inherits Window {
                 if root.show-fps : Text { accessible-label: "Live FPS: " + root.fps-text; text: root.fps-text; color: root.ink; font-family: "Consolas"; font-size: 12px; vertical-alignment: center; min-width: 68px; }
             }
         }
+    }
     }
     if root.quality-open || root.help-open : Rectangle {
         background: root.dark-theme ? #00000099 : #00000033;
@@ -515,7 +580,43 @@ export component App inherits Window {
             }
         }
     }
-    if root.update-banner && !root.update-installing : GlassPanel {
+    if root.about-open : AboutOverlay {
+        version: root.app-version; build-date: root.build-date; revision: root.build-revision;
+        target: root.build-target; compiler: root.build-compiler; author: root.author-name; log-path: root.log-path;
+        close => { root.about-open = false; if root.connected { root.focus-canvas(); } }
+        open-link(index) => { root.about-link(index); }
+        open-logs => { root.open-logs(); }
+    }
+
+    if root.clipboard-open : ClipboardOverlay {
+        shared <=> root.clipboard-shared; mode: root.clipboard-mode;
+        changed => { root.clipboard-changed(); }
+        close => { root.clipboard-open = false; if root.connected { root.focus-canvas(); } }
+        paste-text => { root.paste-windows-text(); }
+        ssh-files => { root.clipboard-open = false; root.open-files(); }
+    }
+
+    if root.files-open : FilesOverlay {
+        host: root.files-host; port <=> root.files-port; username <=> root.files-username; password <=> root.files-password;
+        has-saved: root.files-has-saved; use-saved <=> root.files-use-saved; connected: root.files-connected;
+        connecting: root.files-connecting; busy: root.files-busy; key-pending: root.files-key-pending;
+        fingerprint: root.files-fingerprint; key-algorithm: root.files-key-algorithm; key-command: root.files-key-command;
+        path <=> root.files-path; upload-name <=> root.files-upload-name; entries: root.file-entries;
+        status: root.files-status; error: root.files-error; progress: root.files-progress; progress-label: root.files-progress-label;
+        close => { root.files-close(); }
+        connect => { root.files-connect(); }
+        disconnect => { root.files-disconnect(); }
+        approve(accepted) => { root.files-approve(accepted); }
+        browse => { root.files-browse(); }
+        up => { root.files-up(); }
+        entry(index) => { root.files-entry(index); }
+        upload => { root.files-upload(); }
+        cancel => { root.files-cancel(); }
+        copy-text => { root.files-copy-text(); }
+        send-text => { root.files-send-text(); }
+    }
+
+    if root.update-banner && !root.update-installing && !root.modal-open : GlassPanel {
         x: max(16px, root.width - self.width - 20px);
         y: root.immersive ? 60px : 88px;
         width: min(390px, root.width - 32px); height: 166px; radius: 18px; raised: true;

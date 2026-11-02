@@ -1,10 +1,12 @@
 use std::{
     collections::VecDeque,
     io::{Read, Write},
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicI32, AtomicU64, Ordering},
     },
+    task::{Context, Poll},
     time::{Duration, Instant},
 };
 
@@ -49,6 +51,49 @@ impl<T: Write> Write for Metered<T> {
     }
     fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
+    }
+}
+
+impl<T: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for Metered<T> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let before = buffer.filled().len();
+        let result = Pin::new(&mut self.inner).poll_read(context, buffer);
+        if matches!(result, Poll::Ready(Ok(()))) {
+            self.counters
+                .received
+                .fetch_add((buffer.filled().len() - before) as u64, Ordering::Relaxed);
+        }
+        result
+    }
+}
+
+impl<T: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Metered<T> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let result = Pin::new(&mut self.inner).poll_write(context, bytes);
+        if let Poll::Ready(Ok(size)) = result {
+            self.counters.sent.fetch_add(size as u64, Ordering::Relaxed);
+        }
+        result
+    }
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(context)
+    }
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(context)
     }
 }
 

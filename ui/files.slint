@@ -1,0 +1,154 @@
+import { LineEdit, ScrollView } from "std-widgets.slint";
+import { GlassTheme, GlassPanel, Button, CheckBox } from "glass.slint";
+
+export struct FileRow { name: string, detail: string, directory: bool, regular: bool }
+
+export component FilesOverlay inherits Rectangle {
+    in property <string> host;
+    in-out property <string> port: "22";
+    in-out property <string> username;
+    in-out property <string> password;
+    in property <bool> has-saved;
+    in-out property <bool> use-saved;
+    in property <bool> connected;
+    in property <bool> connecting;
+    in property <bool> busy;
+    in property <bool> key-pending;
+    in property <string> fingerprint;
+    in property <string> key-algorithm;
+    in property <string> key-command;
+    in-out property <string> path;
+    in-out property <string> upload-name;
+    in property <[FileRow]> entries;
+    in property <string> status;
+    in property <string> error;
+    in property <string> progress-label;
+    in property <float> progress;
+    callback close();
+    callback connect();
+    callback disconnect();
+    callback approve(bool);
+    callback browse();
+    callback up();
+    callback entry(int);
+    callback upload();
+    callback cancel();
+    callback copy-text();
+    callback send-text();
+    background: GlassTheme.dark ? #00000099 : #00000033;
+    TouchArea { clicked => { root.close(); } }
+    FocusScope {
+        init => { self.focus(); }
+        key-pressed(event) => { if event.text == Key.Escape { root.close(); return accept; } return reject; }
+        GlassPanel {
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            width: min(840px, parent.width - 40px); height: min(720px, parent.height - 40px);
+            raised: true; radius: 24px;
+            TouchArea { }
+            VerticalLayout {
+                padding: 24px; spacing: 12px;
+                HorizontalLayout {
+                    VerticalLayout {
+                        spacing: 2px;
+                        Text { text: "Files & encrypted clipboard"; color: GlassTheme.ink; font-size: 22px; font-weight: 700; }
+                        Text { text: root.host + "  -  SSH / SFTP"; color: GlassTheme.muted; font-size: 12px; }
+                    }
+                    Button { text: "Done"; clicked => { root.close(); } }
+                }
+                ScrollView {
+                VerticalLayout {
+                spacing: 12px;
+                if root.error != "" : Text { text: root.error; color: GlassTheme.dark ? #ff6961 : #c62820; wrap: word-wrap; font-size: 12px; }
+                if root.key-pending : GlassPanel {
+                    radius: 16px;
+                    VerticalLayout {
+                        padding: 18px; spacing: 15px;
+                        Text { text: "Verify this Mac's SSH host key"; color: GlassTheme.ink; font-size: 19px; font-weight: 600; }
+                        Text { text: root.key-algorithm + "  -  " + root.host + ":" + root.port; color: GlassTheme.muted; font-size: 12px; }
+                        LineEdit { text: root.fingerprint; read-only: true; accessible-label: "SSH SHA-256 fingerprint"; }
+                        Text { text: "Compare this fingerprint on the Mac before trusting it. A changed key is always blocked. No saved password is read or sent before the key is accepted."; color: GlassTheme.ink; wrap: word-wrap; font-size: 13px; }
+                        Text { text: "On the Mac, run:"; color: GlassTheme.muted; font-size: 12px; }
+                        Text { text: root.key-command; color: GlassTheme.ink; wrap: word-wrap; font-size: 12px; }
+                        Rectangle { vertical-stretch: 1; background: transparent; }
+                        HorizontalLayout {
+                            Button { text: "Reject"; clicked => { root.approve(false); } }
+                            Button { text: "Trust key & continue"; primary: true; clicked => { root.approve(true); } }
+                        }
+                    }
+                }
+                if !root.connected && !root.key-pending : VerticalLayout {
+                    spacing: 14px;
+                    Text { text: "On your Mac: System Settings > General > Sharing > Remote Login. Allow your Mac account. Screen Sharing alone does not provide SFTP."; color: GlassTheme.muted; wrap: word-wrap; font-size: 13px; }
+                    HorizontalLayout {
+                        Text { text: "SSH port"; color: GlassTheme.muted; vertical-alignment: center; }
+                        LineEdit { text <=> root.port; enabled: !root.connecting; max-width: 100px; accessible-label: "SSH port"; }
+                        Rectangle { background: transparent; horizontal-stretch: 1; }
+                    }
+                    if root.has-saved : CheckBox { text: "Use saved Mac login (Windows Hello required)"; checked <=> root.use-saved; enabled: !root.connecting; }
+                    if root.use-saved : Text { text: "Your saved login stays locked in Windows Credential Manager. Approve Windows Hello after SSH host verification."; color: GlassTheme.muted; wrap: word-wrap; font-size: 13px; }
+                    if !root.use-saved : VerticalLayout {
+                        spacing: 9px;
+                        LineEdit { text <=> root.username; placeholder-text: "Mac account short username"; enabled: !root.connecting; accessible-label: "SSH Mac username"; }
+                        LineEdit { text <=> root.password; placeholder-text: "Mac account password"; input-type: InputType.password; enabled: !root.connecting; accessible-label: "SSH Mac password"; }
+                        Text { text: "This password is used only for this SSH connection and is not saved."; color: GlassTheme.muted; wrap: word-wrap; font-size: 11px; }
+                    }
+                    HorizontalLayout {
+                        Button { text: root.connecting ? "Verifying SSH..." : "Connect securely"; primary: true; enabled: !root.connecting; clicked => { root.connect(); } }
+                        if root.connecting : Button { text: "Cancel"; clicked => { root.disconnect(); } }
+                    }
+                    Rectangle { background: transparent; vertical-stretch: 1; }
+                }
+                if root.connected && !root.key-pending : VerticalLayout {
+                    spacing: 10px;
+                    HorizontalLayout {
+                        Button { text: "Up"; enabled: !root.busy; clicked => { root.up(); } }
+                        LineEdit { text <=> root.path; enabled: !root.busy; accessible-label: "Mac folder"; accepted => { root.browse(); } }
+                        Button { text: "Go"; enabled: !root.busy; clicked => { root.browse(); } }
+                        Button { text: "Disconnect SSH"; enabled: !root.busy; clicked => { root.disconnect(); } }
+                    }
+                    ScrollView {
+                        preferred-height: 220px; min-height: 100px; max-height: 220px; vertical-stretch: 0;
+                        VerticalLayout {
+                            spacing: 6px; padding-right: 8px;
+                            if root.entries.length == 0 : Text { text: "This folder is empty."; color: GlassTheme.muted; font-size: 13px; }
+                            for file[index] in root.entries : GlassPanel {
+                                radius: 12px; height: 54px;
+                                HorizontalLayout {
+                                    padding: 9px; spacing: 10px;
+                                    VerticalLayout {
+                                        spacing: 1px;
+                                        Text { text: file.name; color: GlassTheme.ink; font-size: 13px; overflow: elide; }
+                                        Text { text: file.detail; color: GlassTheme.muted; font-size: 11px; }
+                                    }
+                                    Button { text: file.directory ? "Open" : (file.regular ? "Receive" : "Not a file"); accessible-label: (file.directory ? "Open " : "Receive ") + file.name; enabled: !root.busy && (file.directory || file.regular); clicked => { root.entry(index); } }
+                                }
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        LineEdit { text <=> root.upload-name; placeholder-text: "Optional new file name on the Mac"; enabled: !root.busy; accessible-label: "Upload file name"; }
+                        Button { text: "Send a file..."; primary: true; enabled: !root.busy; clicked => { root.upload(); } }
+                    }
+                    Text { text: "Single files only. Existing files are never replaced. Uploads are verified by reading them back before the final file is created."; color: GlassTheme.muted; wrap: word-wrap; font-size: 11px; }
+                    HorizontalLayout {
+                        Button { text: "Copy Mac text"; enabled: !root.busy; clicked => { root.copy-text(); } }
+                        Button { text: "Send Windows text"; enabled: !root.busy; clicked => { root.send-text(); } }
+                        Rectangle { background: transparent; horizontal-stretch: 1; }
+                    }
+                    Text { text: "Unicode clipboard uses this SSH account's logged-in Mac desktop. No images, rich text, or clipboard contents are logged."; color: GlassTheme.muted; wrap: word-wrap; font-size: 11px; }
+                    if root.busy : VerticalLayout {
+                        spacing: 6px;
+                        Rectangle { height: 4px; background: GlassTheme.edge; border-radius: 2px; Rectangle { width: parent.width * root.progress; background: GlassTheme.accent; border-radius: 2px; } }
+                        HorizontalLayout {
+                            Text { text: root.progress-label; color: GlassTheme.ink; font-size: 12px; wrap: word-wrap; }
+                            Button { text: "Cancel operation"; clicked => { root.cancel(); } }
+                        }
+                    }
+                }
+                }
+                }
+                Text { text: root.status; color: GlassTheme.muted; font-size: 12px; wrap: word-wrap; }
+            }
+        }
+    }
+}

@@ -26,8 +26,10 @@ use windows::{
 
 use crate::{
     VERSION,
+    audit::{self, Level, Scope},
     error::{Error, Result},
 };
+use serde_json::json;
 
 mod http;
 
@@ -340,7 +342,7 @@ impl Drop for UpdateLock {
     }
 }
 
-fn install(release: &Release, progress: &AtomicU64) -> Result<PathBuf> {
+fn install(release: &Release, progress: &AtomicU64, scope: &Scope) -> Result<PathBuf> {
     let executable = std::env::current_exe()?;
     let _lock = UpdateLock::acquire(&executable)?;
     let parent = executable
@@ -350,6 +352,7 @@ fn install(release: &Release, progress: &AtomicU64) -> Result<PathBuf> {
         .prefix(".maccanvas-update-")
         .suffix(".exe")
         .tempfile_in(parent)?;
+    scope.critical("update.download.started",Level::Info,json!({"artifact.version":release.version.to_string(),"artifact.size":release.size,"artifact.hash.sha256":release.sha256,"url.full":release.url}))?;
     http::download(
         &release.url,
         release.size,
@@ -362,11 +365,36 @@ fn install(release: &Release, progress: &AtomicU64) -> Result<PathBuf> {
     staged.flush()?;
     staged.as_file().sync_all()?;
     verify_executable(&fs::read(staged.path())?, release)?;
+    scope.critical("update.artifact.verified",Level::Info,json!({"artifact.version":release.version.to_string(),"artifact.size":release.size,"artifact.hash.sha256":release.sha256,"event.outcome":"success"}))?;
     let staged = staged.into_temp_path();
     validate_candidate(&staged, &release.version)?;
-    install_at(&executable, &staged, release, |source| {
+    scope.critical(
+        "update.preflight.completed",
+        Level::Info,
+        json!({"event.outcome":"success"}),
+    )?;
+    scope.critical("update.replacement.requested",Level::Info,json!({"process.executable.path":executable,"artifact.previous.hash.sha256":file_hash(&executable)?}))?;
+    let replaced = install_at(&executable, &staged, release, |source| {
         self_replace::self_replace(source)
-    })?;
+    });
+    if let Err(error) = &replaced {
+        let mut attributes = audit::error_attributes(error);
+        attributes["artifact.expected.hash.sha256"] = json!(release.sha256);
+        match file_hash(&executable) {
+            Ok(hash) => attributes["artifact.current.hash.sha256"] = json!(hash),
+            Err(error) => {
+                attributes["artifact.current.error.type"] = json!(audit::error_type(&error))
+            }
+        }
+        if let Err(audit_error) =
+            scope.critical("update.replacement.failed", Level::Error, attributes)
+        {
+            eprintln!("MacCanvas could not persist update recovery evidence: {audit_error}");
+        }
+    }
+    replaced?;
+    scope.critical("update.replacement.completed",Level::Info,json!({"process.executable.path":executable,"artifact.version":release.version.to_string(),"artifact.hash.sha256":release.sha256,"event.outcome":"success"}))
+        .map_err(|error| recovery(format!("The new version is installed, but its final audit receipt failed: {error}.")))?;
     Ok(executable)
 }
 
@@ -449,18 +477,34 @@ impl Updater {
             restart_required: false,
         }
     }
-    pub fn check(&mut self) {
+    pub fn check(&mut self, scope: &Scope) -> Result<()> {
         if self.checking || self.installing || self.restart_required {
-            return;
+            return Ok(());
         }
 
-        self.checking = true;
+        let scope =
+            scope.child(json!({"network.protocol.name":"https","server.address":"api.github.com"}));
+        scope.critical(
+            "update.check.requested",
+            Level::Info,
+            json!({"service.current.version":VERSION}),
+        )?;
         let sender = self.sender.clone();
-        thread::spawn(move || {
-            if sender.send(Event::Checked(check())).is_err() {
+        thread::Builder::new().name("maccanvas-update-check".into()).spawn(move || {
+            let result = check();
+            let attributes = match &result {
+                Ok(Some(release)) => json!({"event.outcome":"available","artifact.version":release.version.to_string(),"artifact.hash.sha256":release.sha256}),
+                Ok(None) => json!({"event.outcome":"up_to_date"}),
+                Err(error) => audit::error_attributes(error),
+            };
+            let recorded = scope.event("update.check.completed",if result.is_ok() { Level::Info } else { Level::Warn },attributes);
+            let result = result.and_then(|release| recorded.map(|_| release));
+            if sender.send(Event::Checked(result)).is_err() {
                 eprintln!("MacCanvas update check finished after the window closed");
             }
-        });
+        })?;
+        self.checking = true;
+        Ok(())
     }
     #[cfg(debug_assertions)]
     pub fn preview_available(&mut self) -> Result<()> {
@@ -478,7 +522,7 @@ impl Updater {
             .map_err(failed)
     }
 
-    pub fn install(&mut self) -> Result<()> {
+    pub fn install(&mut self, scope: &Scope) -> Result<()> {
         if self.installing || self.restart_required {
             return Err(failed(
                 "An update is already installing or MacCanvas needs a restart",
@@ -488,19 +532,33 @@ impl Updater {
             .release
             .clone()
             .ok_or_else(|| failed("No verified newer release is available"))?;
-        self.installing = true;
+        let scope =
+            scope.child(json!({"network.protocol.name":"https","server.address":"github.com"}));
+        scope.critical("update.install.approved",Level::Info,json!({"artifact.version":release.version.to_string(),"artifact.hash.sha256":release.sha256}))?;
         self.progress.store(0, Ordering::Relaxed);
         let sender = self.sender.clone();
         let progress = self.progress.clone();
-        thread::spawn(move || {
-            let result = install(&release, &progress).map_err(|error| match error {
-                Error::Io(io) => failed(io),
-                other => other,
-            });
-            if sender.send(Event::Installed(result)).is_err() {
-                eprintln!("MacCanvas update finished after the window closed");
-            }
-        });
+        thread::Builder::new()
+            .name("maccanvas-update-install".into())
+            .spawn(move || {
+                let result = install(&release, &progress, &scope).map_err(|error| match error {
+                    Error::Io(io) => failed(io),
+                    other => other,
+                });
+                if let Err(error) = &result
+                    && let Err(audit_error) = scope.critical(
+                        "update.install.failed",
+                        Level::Error,
+                        audit::error_attributes(error),
+                    )
+                {
+                    eprintln!("MacCanvas update audit failed: {audit_error}");
+                }
+                if sender.send(Event::Installed(result)).is_err() {
+                    eprintln!("MacCanvas update finished after the window closed");
+                }
+            })?;
+        self.installing = true;
         Ok(())
     }
     pub fn event(&self) -> Result<Option<Event>> {

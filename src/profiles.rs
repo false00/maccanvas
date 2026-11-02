@@ -1,4 +1,9 @@
-use std::{collections::HashSet, fs, io::Write, path::Path};
+use std::{
+    collections::HashSet,
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -7,6 +12,14 @@ use crate::{
     error::{Error, Result},
     streaming::StreamSettings,
 };
+
+pub fn default_directory() -> Result<PathBuf> {
+    dirs::data_local_dir()
+        .map(|directory| directory.join("MacCanvas"))
+        .ok_or_else(|| {
+            Error::Configuration("Windows did not return a local app-data folder".into())
+        })
+}
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -52,6 +65,51 @@ impl Profile {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SshHostKey {
+    pub host: String,
+    pub port: u16,
+    pub algorithm: String,
+    pub sha256: String,
+}
+
+impl SshHostKey {
+    pub fn validate(&self) -> Result<()> {
+        Profile {
+            id: Uuid::nil(),
+            name: "SSH host".into(),
+            host: self.host.clone(),
+            port: self.port,
+            authentication: AuthMode::MacLogin,
+            has_saved_credentials: false,
+        }
+        .validate()?;
+        if self.algorithm.is_empty()
+            || self.algorithm.len() > 100
+            || !self
+                .algorithm
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-@.".contains(&byte))
+            || !self.sha256.strip_prefix("SHA256:").is_some_and(|value| {
+                value.len() == 43
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"+/".contains(&byte))
+            })
+        {
+            return Err(Error::Configuration(
+                "Invalid SSH host-key fingerprint".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn endpoint(&self, host: &str, port: u16) -> bool {
+        self.port == port && self.host.eq_ignore_ascii_case(host)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
@@ -68,6 +126,10 @@ pub struct Settings {
     pub show_fps: bool,
     #[serde(default)]
     pub streaming: StreamSettings,
+    #[serde(default)]
+    pub clipboard_enabled: bool,
+    #[serde(default)]
+    pub ssh_host_keys: Vec<SshHostKey>,
 }
 
 fn enabled() -> bool {
@@ -85,6 +147,8 @@ impl Default for Settings {
             sidebar_open: true,
             show_fps: true,
             streaming: StreamSettings::default(),
+            clipboard_enabled: false,
+            ssh_host_keys: Vec::new(),
         }
     }
 }
@@ -92,7 +156,7 @@ impl Default for Settings {
 impl Settings {
     pub fn validate(&self) -> Result<()> {
         self.streaming.validate()?;
-        if self.version != 1 || self.profiles.len() > 128 {
+        if self.version != 1 || self.profiles.len() > 128 || self.ssh_host_keys.len() > 128 {
             return Err(Error::Configuration(
                 "Unsupported settings version or too many machines".into(),
             ));
@@ -102,6 +166,15 @@ impl Settings {
             profile.validate()?;
             if !identifiers.insert(profile.id) {
                 return Err(Error::Configuration("Duplicate machine identifier".into()));
+            }
+        }
+        let mut endpoints = HashSet::new();
+        for key in &self.ssh_host_keys {
+            key.validate()?;
+            if !endpoints.insert((key.host.to_ascii_lowercase(), key.port)) {
+                return Err(Error::Configuration(
+                    "Duplicate SSH host-key endpoint".into(),
+                ));
             }
         }
         Ok(())
@@ -143,6 +216,20 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ssh_keys_are_validated_even_when_no_machines_are_saved() {
+        let settings = Settings {
+            ssh_host_keys: vec![SshHostKey {
+                host: "mac.local".into(),
+                port: 22,
+                algorithm: "ssh-ed25519".into(),
+                sha256: "not-a-fingerprint".into(),
+            }],
+            ..Settings::default()
+        };
+        assert!(settings.validate().is_err());
+    }
 
     #[test]
     fn settings_never_serialize_credentials() {

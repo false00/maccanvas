@@ -241,11 +241,11 @@ def native_window(pid):
     return windows[0] if windows else None
 
 
-def automate(pid, port, action):
+def automate(pid, port, action, extra=()):
     output = subprocess.check_output([
         "powershell.exe", "-NoProfile", "-File", str(ROOT / "scripts" / "Gui-Fixture.ps1"),
-        "-ProcessId", str(pid), "-Port", str(port), "-Action", action
-    ], text=True, timeout=30)
+        "-ProcessId", str(pid), "-Port", str(port), "-Action", action, *extra
+    ], text=True, timeout=60 if action == "ssh-dialogs" else 30)
     return json.loads(output) if action in ("bounds", "telemetry") else None
 
 
@@ -287,7 +287,7 @@ def wait(predicate, process, fixture, description, timeout=20):
     raise AssertionError(f"Timed out: {description}; recent fixture pointer events: {fixture.pointers[-5:]}")
 
 
-def main(executable, native_messages=False):
+def main(executable, native_messages=False, ssh_fixture_executable=None):
     fixture = Fixture()
     thread = threading.Thread(target=fixture.run, daemon=True)
     thread.start()
@@ -296,6 +296,24 @@ def main(executable, native_messages=False):
         raise ctypes.WinError(ctypes.get_last_error())
     foreground = user32.GetForegroundWindow()
     with tempfile.TemporaryDirectory(prefix="maccanvas-gui-") as data:
+        ssh_process = None
+        ssh_directory = Path(data) / "ssh-fixture"
+        ssh_info = None
+        if ssh_fixture_executable is not None:
+            ssh_directory.mkdir()
+            ssh_environment = os.environ.copy()
+            ssh_environment["MACCANVAS_GUI_SSH_FIXTURE"] = str(ssh_directory)
+            ssh_process = subprocess.Popen(
+                [str(ssh_fixture_executable), "--ignored", "--exact", "serve_owned_gui_fixture", "--nocapture"],
+                env=ssh_environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            deadline = time.monotonic() + 15
+            while not (ssh_directory / "ready.json").is_file():
+                if ssh_process.poll() is not None or time.monotonic() > deadline:
+                    raise AssertionError("Owned SSH fixture did not start")
+                time.sleep(0.05)
+            ssh_info = json.loads((ssh_directory / "ready.json").read_text())
         environment = os.environ.copy()
         environment["PATH"] = str(Path(environment["SYSTEMROOT"]) / "System32")
         process = subprocess.Popen(
@@ -389,6 +407,12 @@ def main(executable, native_messages=False):
             automate(process.pid, fixture.port, "manual-quality")
             wait(lambda: len(fixture.offers) >= 2, process, fixture, "live encoding configuration")
             print("PASS: manual bandwidth target and FPS controls apply without reconnecting")
+            automate(process.pid, fixture.port, "panels")
+            print("PASS: About author/build metadata and native clipboard/SSH connection panels")
+            if ssh_info is not None:
+                automate(process.pid, fixture.port, "ssh-dialogs",
+                         ("-SshPort", str(ssh_info["port"]), "-SshFingerprint", ssh_info["fingerprint"]))
+                print("PASS: native SSH fingerprint trust, SFTP browser, and both owned Windows file pickers")
             if not user32.SetWindowPos(window, None, 0, 0, 1500, 950, 0x16):
                 raise ctypes.WinError(ctypes.get_last_error())
             time.sleep(0.5)
@@ -435,6 +459,7 @@ def main(executable, native_messages=False):
                     user32.SetForegroundWindow(foreground)
             if window and process.poll() is None:
                 user32.PostMessageW(window, 0x10, 0, 0)
+            close_error = None
             try:
                 stdout, stderr = process.communicate(timeout=10)
             except subprocess.TimeoutExpired:
@@ -443,18 +468,46 @@ def main(executable, native_messages=False):
                     f"Stop-Process -Id {process.pid} -Force"
                 ], check=True)
                 stdout, stderr = process.communicate(timeout=5)
-                raise AssertionError("Viewer did not close cleanly")
+                close_error = "Viewer did not close cleanly"
             fixture.listener.close()
             thread.join(timeout=3)
+            if ssh_process is not None:
+                (ssh_directory / "stop").write_text("stop")
+                ssh_stdout, ssh_stderr = ssh_process.communicate(timeout=15)
+                assert ssh_process.returncode == 0, ssh_stdout + ssh_stderr
             if stderr:
                 print(stderr)
+            if close_error:
+                raise AssertionError(close_error)
             if process.returncode:
                 raise AssertionError(f"Viewer exit code {process.returncode}")
+            audit_path = Path(data) / "audit" / "log.json"
+            audit_text = audit_path.read_text(encoding="utf-8")
+            records = [json.loads(line) for line in audit_text.splitlines()]
+            assert records[0]["event_name"] == "application.started"
+            assert records[-1]["event_name"] == "application.stopped"
+            resource = records[0]["resource"]
+            assert resource["process.pid"] == process.pid
+            assert resource["process.parent_pid"] == os.getpid()
+            assert len(resource["process.executable.hash.sha256"]) == 64
+            assert resource["user.id"].startswith("S-1-")
+            assert "fixture-password" not in audit_text and "fixture-user" not in audit_text
+            assert "FixturePassword-DoNotPutInLogs" not in audit_text
+            if ssh_info is not None:
+                assert "ssh.host_key.pinned" in audit_text
+                assert audit_text.count('"file.dialog.cancelled"') >= 2
+            subprocess.run(
+                [str(executable), "--verify-log", str(audit_path)],
+                check=True, capture_output=True, text=True, timeout=10,
+            )
+            print("PASS: real launch-parent evidence, secret-free JSONL, clean shutdown, and hash-chain verification")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--executable", type=Path, default=ROOT / "target" / "x86_64-pc-windows-msvc" / "debug" / "maccanvas.exe")
     parser.add_argument("--native-messages", action="store_true", help="Dispatch native test messages without requiring foreground keyboard ownership")
+    parser.add_argument("--ssh-fixture-executable", type=Path, help="Owned Rust integration-test executable providing the bounded SSH fixture")
     arguments = parser.parse_args()
-    main(arguments.executable.resolve(), arguments.native_messages)
+    main(arguments.executable.resolve(), arguments.native_messages,
+         arguments.ssh_fixture_executable.resolve() if arguments.ssh_fixture_executable else None)

@@ -151,6 +151,7 @@ impl StreamSettings {
             encodings.push(0);
         }
         encodings.extend([
+            crate::clipboard::ENCODING,
             -223,
             -308,
             -239,

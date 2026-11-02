@@ -5,7 +5,7 @@
 **Your Mac. Your Windows screen.**
 
 A lightweight Windows viewer for macOS Screen Sharing.
-One portable executable. No extra DLLs, server, or subscription.
+One portable executable. No extra DLLs or subscription.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/connections-dark.png">
@@ -25,6 +25,8 @@ One portable executable. No extra DLLs, server, or subscription.
 - **Familiar controls:** mouse, keyboard, scrolling, full screen, and optional Ctrl-to-Command shortcuts.
 - **Glass-inspired appearance:** black/charcoal in dark mode, Apple-style whites and grays in light mode, and system-blue controls. Follows Windows appearance preferences.
 - **Easy updates:** checks the official release on launch and prompts before a verified, one-click update and restart.
+- **Clipboard and files:** opt-in VNC text sharing, encrypted Unicode clipboard, and verified SFTP file transfers.
+- **Local security audit:** structured JSONL evidence, process ancestry, connection history, and file-transfer receipts.
 
 ## Install
 
@@ -75,19 +77,48 @@ Proprietary Apple high-performance codecs and H.264 are not supported.
 
 A bandwidth target paces screen requests; **it is not a guaranteed bitrate cap**.
 Bursts can exceed it. Keyboard and mouse input are not throttled.
-Traffic measures RFB bytes, excluding TCP/VPN overhead. FPS counts unique desktop
+Traffic measures VNC and SSH stream bytes, excluding TCP/VPN overhead and update checks. FPS counts unique desktop
 images submitted for display, not monitor refreshes; idle screens can read 0 FPS.
+
+## Clipboard and files
+
+Open **Clipboard** to enable VNC plain-text sharing. Ctrl+V sends Windows text
+when pasting into the Mac; incoming Mac text can replace your Windows clipboard.
+Standard VNC supports Latin-1; Unicode requires a negotiated UTF-8 extension.
+
+For encrypted Unicode copy/paste and file transfer, open **Files** and enable
+**Remote Login** in the Mac's Sharing settings. Verify the SSH fingerprint before
+trusting a new Mac. Saved Mac logins require fresh Windows Hello approval.
+
+Send or receive single files without overwriting existing files. Uploads are
+SHA-256 checked by reading them back before the final file is created.
+Folders, images/rich-text clipboard formats, and Apple's proprietary drag-and-drop
+transfer are not supported. [Setup and compatibility](docs/sharing.md).
 
 ## Saved-login privacy
 
 Passwords never enter profile files or a saved-password display field.
-Every [saved-login attempt](docs/images/saved-login.png) requires a fresh Hello approval. If Hello is unavailable
-or cancelled, the app neither reads the saved password nor opens the connection.
+Every [saved-login attempt](docs/images/saved-login.png), including SSH, requires a fresh Hello approval.
+If Hello is unavailable or cancelled, the app neither reads nor sends the saved password.
+SSH verifies the host key before requesting Hello.
 You may instead enter credentials manually; this does not unlock the saved login.
 
 Delete a Mac in the app to remove its saved credential. Saved logins are tied to
 their original address. Hello is an app approval gate, not extra vault encryption:
 other software running as your Windows user may access generic Windows credentials.
+
+## Security logging
+
+`~\.maccanvas\log.json` is **JSONL: one JSON record per line**.
+Open its folder from **About**.
+
+Local evidence includes executable hashes, build details, Windows identity, parent-process
+ancestry, network endpoints, Hello/authentication outcomes, updates, and file-transfer
+paths, sizes, and SHA-256 receipts. Logs have per-user Windows permissions and bounded rotation.
+Passwords, PINs, keystrokes, clipboard contents, and file contents are never logged.
+
+Logs contain sensitive metadata and are **not encrypted or tamper-proof**.
+[Logging, retention, and integrity verification](docs/security-logging.md).
 
 ## Remove
 
@@ -97,7 +128,7 @@ Close MacCanvas, then:
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/false00/maccanvas/main/install.ps1))) -Uninstall
 ```
 
-The managed application and shortcut are removed. Profiles and credentials are
+The managed application and shortcut are removed. Profiles, credentials, and audit logs are
 preserved; delete saved Macs in the app first to remove their logins.
 For a portable copy, delete the executable.
 
@@ -114,6 +145,9 @@ cargo build --release --locked
 The pinned toolchain builds `target\x86_64-pc-windows-msvc\release\maccanvas.exe`.
 Rust + Slint, software rendering, static Microsoft C runtime.
 Windows releases are built and tested in GitHub Actions.
+
+Maintained by [Juan Ortega (@false00)](https://github.com/false00).
+**About** shows the version, UTC build date, source revision, target, and compiler.
 
 An independent project inspired by [TigerVNC](https://tigervnc.org/).
 Credit to the TigerVNC team, RealVNC, TightVNC, and the original VNC authors.
