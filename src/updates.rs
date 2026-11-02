@@ -222,7 +222,10 @@ fn install_at(
     let receipt = match fs::metadata(&receipt_path) {
         Ok(metadata) => {
             if metadata.len() > 4096
-                || executable.file_name().and_then(|name| name.to_str()) != Some("MacCanvas.exe")
+                || !executable
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.eq_ignore_ascii_case("MacCanvas.exe"))
             {
                 return Err(failed(
                     "The managed installation receipt does not match this executable",
@@ -603,6 +606,32 @@ mod tests {
         assert_eq!(updated.sha256, file_hash(&executable).unwrap());
         assert_eq!(updated.version, release.tag);
     }
+    #[test]
+    fn managed_executable_names_follow_windows_case_insensitivity() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("maccanvas.exe");
+        let staged = directory.path().join("staged.exe");
+        let receipt = directory.path().join(".maccanvas-install.json");
+        fs::write(&executable, b"old fixture").unwrap();
+        write_receipt(
+            &receipt,
+            &Receipt {
+                repository: REPOSITORY.into(),
+                version: "v0.1.1".into(),
+                sha256: file_hash(&executable).unwrap(),
+            },
+        )
+        .unwrap();
+        let (bytes, release) = fixture();
+        fs::write(&staged, bytes).unwrap();
+        install_at(&executable, &staged, &release, |source| {
+            fs::copy(source, &executable)?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(file_hash(&executable).unwrap(), release.sha256);
+    }
+
     #[test]
     fn failed_replacement_restores_the_original_receipt() {
         let directory = tempfile::tempdir().unwrap();
