@@ -1,0 +1,22 @@
+MacCanvas - third-party notices
+==============================
+
+Credit to the TigerVNC team, RealVNC, TightVNC, and the original VNC authors
+for their contributions to remote desktop clients and the RFB ecosystem.
+This independent Rust viewer does not embed TigerVNC's C++ code.
+
+The following libraries are selected for the Windows x64 release.
+Each library retains its own license. Matching source packages:
+https://crates.io/crates/NAME/VERSION
+
+{{#each licenses}}
+{{name}}
+----------------------------------------------------------------------
+Used by:
+{{#each used_by}}
+  {{crate.name}} {{crate.version}} - https://crates.io/crates/{{crate.name}}/{{crate.version}}
+{{/each}}
+
+{{{text}}}
+
+{{/each}}

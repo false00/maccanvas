@@ -1,0 +1,282 @@
+import { Button, LineEdit, CheckBox, ComboBox, ScrollView, Palette } from "std-widgets.slint";
+
+export struct Machine {
+    name: string,
+    detail: string,
+    saved: bool,
+}
+
+component Caption inherits Text {
+    color: Palette.foreground;
+    font-size: 13px;
+    font-weight: 600;
+    height: 20px;
+}
+
+export component App inherits Window {
+    title: "MacCanvas";
+    preferred-width: 1200px;
+    preferred-height: 820px;
+    min-width: 820px;
+    min-height: 560px;
+    default-font-family: "Segoe UI";
+    default-font-size: 14px;
+
+    in-out property <string> machine-name;
+    in-out property <string> host;
+    in-out property <string> port: "5900";
+    in-out property <string> username;
+    in-out property <string> password;
+    in-out property <int> auth-mode: 0;
+    in-out property <bool> remember-password: false;
+    in-out property <bool> use-saved: false;
+    in property <bool> has-saved: false;
+    in-out property <bool> ctrl-as-command: true;
+    in-out property <bool> hello-all: false;
+    in-out property <bool> dark-theme: false;
+    in property <[Machine]> machines;
+    in property <int> selected: -1;
+    in property <bool> connected: false;
+    in property <bool> connecting: false;
+    in property <bool> immersive: false;
+    in property <string> status: "Ready to connect";
+    in property <string> error-text;
+    in property <string> desktop-description;
+    in property <image> frame-image;
+    in property <float> draw-left;
+    in property <float> draw-top;
+    in property <float> draw-width;
+    in property <float> draw-height;
+    out property <float> canvas-width: canvas.width / 1px;
+    out property <float> canvas-height: canvas.height / 1px;
+
+    callback connect-requested();
+    callback disconnect-requested();
+    callback save-machine();
+    callback new-machine();
+    callback delete-machine();
+    callback select-machine(int);
+    callback save-preferences();
+    callback refresh-desktop();
+    callback fullscreen-requested();
+    callback canvas-resized();
+    callback pointer-event(float, float, PointerEvent);
+    callback wheel-event(float, float, PointerScrollEvent);
+    callback keyboard-event(KeyEvent, bool) -> bool;
+    callback release-input();
+    callback focus-canvas();
+
+    init => { Palette.color-scheme = root.dark-theme ? ColorScheme.dark : ColorScheme.light; }
+    changed dark-theme => {
+        Palette.color-scheme = root.dark-theme ? ColorScheme.dark : ColorScheme.light;
+    }
+    changed canvas-width => { root.canvas-resized(); }
+    changed canvas-height => { root.canvas-resized(); }
+    focus-canvas => { remote-focus.focus(); }
+
+    background: root.dark-theme ? #101824 : #f3f6fa;
+    property <color> panel: root.dark-theme ? #182335 : #ffffff;
+    property <color> outline: root.dark-theme ? #304155 : #dce5ee;
+    property <color> muted: root.dark-theme ? #a8b8ca : #63738a;
+    property <color> ink: root.dark-theme ? #eef5ff : #16283e;
+    property <color> accent: root.dark-theme ? #62d9c2 : #087e72;
+
+    VerticalLayout {
+        spacing: 0px;
+        if !root.immersive : Rectangle {
+            height: 66px;
+            background: root.panel;
+            border-width: 1px;
+            border-color: root.outline;
+            HorizontalLayout {
+                padding-left: 22px;
+                padding-right: 18px;
+                padding-top: 12px;
+                padding-bottom: 12px;
+                spacing: 14px;
+                Rectangle {
+                    width: 36px;
+                    height: 36px;
+                    border-radius: 11px;
+                    background: #087e72;
+                    Text { text: "MC"; color: #ffffff; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                }
+                VerticalLayout {
+                    spacing: 1px;
+                    Text { text: "MacCanvas"; color: root.ink; font-size: 20px; font-weight: 700; }
+                    Text { text: "Your Mac. Your Windows screen."; color: root.muted; font-size: 12px; }
+                }
+                Rectangle { horizontal-stretch: 1; background: transparent; }
+                Button {
+                    text: root.dark-theme ? "Light" : "Dark";
+                    clicked => { root.dark-theme = !root.dark-theme; root.save-preferences(); }
+                }
+                Button {
+                    text: "Refresh";
+                    enabled: root.connected;
+                    clicked => { root.refresh-desktop(); }
+                }
+                Button {
+                    text: "Full screen";
+                    enabled: root.connected;
+                    clicked => { root.fullscreen-requested(); }
+                }
+                Button {
+                    text: "Disconnect";
+                    enabled: root.connected || root.connecting;
+                    clicked => { root.disconnect-requested(); }
+                }
+            }
+        }
+        HorizontalLayout {
+            padding: root.immersive ? 0px : 16px;
+            spacing: root.immersive ? 0px : 16px;
+            if !root.immersive : Rectangle {
+                width: 306px;
+                background: root.panel;
+                border-width: 1px;
+                border-color: root.outline;
+                border-radius: root.immersive ? 0px : 14px;
+                ScrollView {
+                    VerticalLayout {
+                        padding: 18px;
+                        spacing: 8px;
+                        HorizontalLayout {
+                            Caption { text: "YOUR MACS"; color: root.muted; }
+                            Button {
+                                text: "New";
+                                enabled: !root.connected && !root.connecting;
+                                clicked => { root.new-machine(); }
+                            }
+                        }
+                        for machine[index] in root.machines : Rectangle {
+                            height: 58px;
+                            background: root.selected == index ? (root.dark-theme ? #214139 : #e8f5f1) : transparent;
+                            border-radius: 8px;
+                            VerticalLayout {
+                                padding: 9px;
+                                spacing: 1px;
+                                Text { text: machine.name; font-weight: 600; color: root.ink; overflow: elide; }
+                                Text { text: machine.detail + (machine.saved ? "  |  Saved login" : ""); color: root.muted; font-size: 11px; overflow: elide; }
+                            }
+                            TouchArea {
+                                enabled: !root.connected && !root.connecting;
+                                clicked => { root.select-machine(index); }
+                            }
+                        }
+                        Rectangle { height: 1px; background: root.outline; }
+                        Caption { text: "CONNECTION"; color: root.muted; }
+                        Caption { text: "Name"; }
+                        LineEdit { accessible-label: "Machine name"; text <=> root.machine-name; placeholder-text: "Mac mini"; enabled: !root.connected && !root.connecting; }
+                        Caption { text: "Host or IP address"; }
+                        LineEdit { accessible-label: "Mac address"; text <=> root.host; placeholder-text: "192.168.1.50"; enabled: !root.connected && !root.connecting; }
+                        HorizontalLayout {
+                            Caption { text: "Port"; vertical-alignment: center; }
+                            LineEdit { accessible-label: "VNC port"; width: 94px; text <=> root.port; enabled: !root.connected && !root.connecting; input-type: number; }
+                        }
+                        Caption { text: "Login method"; }
+                        ComboBox { model: ["Mac account", "VNC password"]; current-index <=> root.auth-mode; enabled: !root.connected && !root.connecting; }
+                        CheckBox {
+                            text: "Use saved login (Windows Hello)";
+                            checked <=> root.use-saved;
+                            enabled: root.has-saved && !root.connected && !root.connecting;
+                        }
+                        Caption { text: root.auth-mode == 0 ? "Mac username" : "Username not used in VNC password mode"; }
+                        LineEdit { accessible-label: "Mac username"; text <=> root.username; placeholder-text: "Your macOS account"; enabled: root.auth-mode == 0 && !root.use-saved && !root.connected && !root.connecting; }
+                        Caption { text: "Password"; }
+                        LineEdit { accessible-label: "Mac password"; text <=> root.password; input-type: InputType.password; placeholder-text: root.use-saved ? "Unlocked by Windows Hello" : "Never stored in a file"; enabled: !root.use-saved && !root.connected && !root.connecting; }
+                        CheckBox {
+                            text: "Remember in Credential Manager";
+                            checked <=> root.remember-password;
+                            enabled: !root.use-saved && !root.connected && !root.connecting;
+                        }
+                        Button {
+                            text: root.connecting ? "Connecting..." : "Connect to Mac";
+                            primary: true;
+                            enabled: !root.connected && !root.connecting;
+                            clicked => { root.connect-requested(); }
+                        }
+                        HorizontalLayout {
+                            Button { text: "Save machine"; enabled: !root.connected && !root.connecting; clicked => { root.save-machine(); } }
+                            Button { text: "Delete"; enabled: root.selected >= 0 && !root.connected && !root.connecting; clicked => { root.delete-machine(); } }
+                        }
+                        Rectangle { height: 1px; background: root.outline; }
+                        Caption { text: "COMFORT & SECURITY"; color: root.muted; }
+                        CheckBox { text: "Ctrl shortcuts act as Command"; checked <=> root.ctrl-as-command; toggled => { root.save-preferences(); } }
+                        CheckBox { text: "Hello before every connection"; checked <=> root.hello-all; toggled => { root.save-preferences(); } }
+                        Text {
+                            text: "Saved passwords always require Windows Hello. Use a VPN for remote access; standard Mac VNC screen traffic is not encrypted.";
+                            color: root.muted; font-size: 12px; wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+            VerticalLayout {
+                spacing: 10px;
+                if root.error-text != "" : Rectangle {
+                    background: root.dark-theme ? #49272d : #fff0f0;
+                    border-radius: 8px;
+                    min-height: 46px;
+                    Text { text: root.error-text; color: root.dark-theme ? #ffd2d2 : #9e2638; wrap: word-wrap; x: 12px; y: 10px; width: parent.width - 24px; height: parent.height - 20px; }
+                }
+                canvas := Rectangle {
+                    accessible-role: groupbox;
+                    accessible-label: "Remote desktop";
+                    vertical-stretch: 1;
+                    horizontal-stretch: 1;
+                    border-radius: 14px;
+                    background: #101824;
+                    clip: true;
+                    if !root.connected : VerticalLayout {
+                        alignment: center;
+                        spacing: 14px;
+                        Text { text: "Make room for your Mac."; color: #e8f5ff; font-size: 28px; font-weight: 600; horizontal-alignment: center; }
+                        Text { text: root.connecting ? "Verifying and connecting..." : "Sharp scaling. Familiar controls. No tiny cursor."; color: #97adc5; font-size: 15px; horizontal-alignment: center; wrap: word-wrap; }
+                        Text { text: "Enable Screen Sharing on your Mac, then connect with its IP or VPN address."; color: #7e94ac; font-size: 13px; horizontal-alignment: center; wrap: word-wrap; }
+                    }
+                    if root.connected : Image {
+                        x: root.draw-left * 1px;
+                        y: root.draw-top * 1px;
+                        width: root.draw-width * 1px;
+                        height: root.draw-height * 1px;
+                        source: root.frame-image;
+                        image-fit: fill;
+                    }
+                    remote-focus := FocusScope {
+                        enabled: root.connected;
+                        key-pressed(event) => { return root.keyboard-event(event, true) ? EventResult.accept : EventResult.reject; }
+                        key-released(event) => { return root.keyboard-event(event, false) ? EventResult.accept : EventResult.reject; }
+                        changed has-focus => { if !self.has-focus { root.release-input(); } }
+                        TouchArea {
+                            enabled: root.connected;
+                            mouse-cursor: default;
+                            pointer-event(event) => {
+                                if event.kind == PointerEventKind.down { remote-focus.focus(); }
+                                root.pointer-event(self.mouse-x / 1px, self.mouse-y / 1px, event);
+                            }
+                            scroll-event(event) => {
+                                root.wheel-event(self.mouse-x / 1px, self.mouse-y / 1px, event);
+                                return EventResult.accept;
+                            }
+                        }
+                    }
+                    if root.immersive : Button {
+                        x: parent.width - self.width - 12px;
+                        y: 12px;
+                        width: 156px;
+                        height: 32px;
+                        text: "Exit full screen";
+                        clicked => { root.fullscreen-requested(); }
+                    }
+                }
+                if !root.immersive : HorizontalLayout {
+                    height: 22px;
+                    Rectangle { width: 7px; height: 7px; border-radius: 4px; background: root.connected ? #26aa8a : #8394a8; }
+                    Text { text: root.status; color: root.ink; font-size: 12px; overflow: elide; }
+                    Rectangle { background: transparent; horizontal-stretch: 1; }
+                    Text { text: root.desktop-description; color: root.muted; font-size: 12px; }
+                }
+            }
+        }
+    }
+}

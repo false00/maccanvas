@@ -1,0 +1,8 @@
+accepted = [
+    "GPL-3.0-only", "GPL-3.0-or-later", "MIT", "Apache-2.0",
+    "BSD-2-Clause", "BSD-3-Clause", "ISC", "MPL-2.0", "Unicode-3.0",
+    "Zlib", "OFL-1.1", "CC0-1.0", "BSL-1.0", "0BSD",
+]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+targets = ["x86_64-pc-windows-msvc"]
