@@ -13,6 +13,7 @@ use crate::{
     profiles::AuthMode,
 };
 
+#[derive(Clone)]
 pub struct Credentials {
     username: Zeroizing<String>,
     password: Zeroizing<String>,

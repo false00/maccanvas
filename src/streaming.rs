@@ -7,7 +7,6 @@ use crate::error::{Error, Result};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Encoding {
-    #[default]
     Auto,
     Zrle,
     Tight,
@@ -17,6 +16,7 @@ pub enum Encoding {
     Rre,
     Corre,
     Raw,
+    #[default]
     Hevc30,
     Hevc60,
 }
@@ -38,6 +38,10 @@ impl Encoding {
 
     pub fn is_hevc(self) -> bool {
         matches!(self, Self::Hevc30 | Self::Hevc60)
+    }
+
+    pub fn requires_reconnect(self, next: Self) -> bool {
+        self != next && (self.is_hevc() || next.is_hevc())
     }
 
     pub fn fps_ceiling(self) -> u16 {
@@ -81,7 +85,7 @@ impl Encoding {
     pub fn description(self) -> &'static str {
         match self {
             Self::Auto => {
-                "Recommended: prefer lossless ZRLE, then Tight and legacy fallbacks. The Mac chooses an offered encoding; the live label shows what it actually sends."
+                "Lossless VNC: prefer ZRLE, then Tight and legacy fallbacks. The Mac chooses an offered encoding; the live label shows what it actually sends. Use this for Macs or networks that do not support HEVC."
             }
             Self::Zrle => {
                 "ZRLE: lossless compressed tiles. Sharp text and a good desktop default; more CPU than Raw. Noise and video can still use substantial bandwidth."
@@ -108,10 +112,10 @@ impl Encoding {
                 "Raw: no pixel compression and the lowest compression CPU cost. Best only on fast trusted links; full-frame 4K motion can require several gigabits per second."
             }
             Self::Hevc30 => {
-                "Apple High Performance HEVC/H.265 at up to 30 FPS. Lower stream and decoding load than 60 FPS; preserves the Mac's physical desktop. Requires Mac account login and UDP on the VNC port and the next port. A native decoder is bundled; no codec extension is needed. Reconnect to change transports. Use Files for encrypted clipboard."
+                "Default: Apple High Performance HEVC/H.265 at up to 30 FPS. Lower stream and decoding load than 60 FPS; preserves the Mac's physical desktop. Requires Mac account login and UDP on the VNC port and the next port. A native decoder is bundled; no codec extension is needed. Apply reconnects automatically when needed. Use Files for encrypted clipboard."
             }
             Self::Hevc60 => {
-                "Apple High Performance HEVC/H.265 at up to 60 FPS. Smoother motion with higher CPU and bandwidth use. Uses the same physical Mac desktop, encrypted control and SRTP video, with bundled native decoding. Requires a compatible Mac, Mac account login and UDP on both media ports. Reconnect to change the HEVC preset."
+                "Apple High Performance HEVC/H.265 at up to 60 FPS. Smoother motion with higher CPU and bandwidth use. Uses the same physical Mac desktop, encrypted control and SRTP video, with bundled native decoding. Requires a compatible Mac, Mac account login and UDP on both media ports. Apply reconnects automatically when needed."
             }
         }
     }
@@ -130,16 +134,26 @@ pub struct StreamSettings {
 impl Default for StreamSettings {
     fn default() -> Self {
         Self {
-            encoding: Encoding::Auto,
+            encoding: Encoding::Hevc30,
             compression: 6,
             jpeg_quality: 8,
             target_kbps: 0,
-            max_fps: 60,
+            max_fps: 30,
         }
     }
 }
 
 impl StreamSettings {
+    pub fn validate_authentication(self, authentication: crate::profiles::AuthMode) -> Result<()> {
+        self.validate()?;
+        if self.encoding.is_hevc() && authentication != crate::profiles::AuthMode::MacLogin {
+            return Err(Error::Configuration(
+                "HEVC requires Mac account login. Choose a lossless VNC mode in Quality to use a classic VNC password.".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn validate(self) -> Result<()> {
         if self.encoding.is_hevc() && self.target_kbps != 0 {
             return Err(Error::Configuration(
@@ -248,18 +262,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_are_explicit_and_lossless() {
+    fn defaults_are_hevc30_with_adaptive_bitrate() {
         let settings = StreamSettings::default();
-        assert_eq!(settings.encoding, Encoding::Auto);
+        assert_eq!(settings.encoding, Encoding::Hevc30);
+        assert_eq!(Encoding::default(), Encoding::Hevc30);
+        assert_eq!(settings.max_fps, 30);
         assert_eq!(settings.target_kbps, 0);
         assert_eq!(settings.compression, 6);
+        assert!(settings.encodings().is_err());
+        settings.validate().unwrap();
+    }
+
+    #[test]
+    fn transport_and_hevc_preset_changes_require_restart_but_live_settings_do_not() {
+        for current in Encoding::ALL {
+            for next in Encoding::ALL {
+                let expected = current != next && (current.is_hevc() || next.is_hevc());
+                assert_eq!(current.requires_reconnect(next), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn hevc_requires_mac_account_authentication_without_a_silent_downgrade() {
+        use crate::profiles::AuthMode;
         assert!(
-            !settings
-                .encodings()
-                .unwrap()
-                .iter()
-                .any(|id| (-32..=-23).contains(id))
+            StreamSettings::default()
+                .validate_authentication(AuthMode::MacLogin)
+                .is_ok()
         );
+        assert!(
+            StreamSettings::default()
+                .validate_authentication(AuthMode::VncPassword)
+                .is_err()
+        );
+        StreamSettings {
+            encoding: Encoding::Auto,
+            ..Default::default()
+        }
+        .validate_authentication(AuthMode::VncPassword)
+        .unwrap();
     }
 
     #[test]
@@ -296,6 +338,7 @@ mod tests {
     #[test]
     fn manual_target_and_fps_determine_the_next_request_not_input() {
         let settings = StreamSettings {
+            encoding: Encoding::Auto,
             target_kbps: 8000,
             max_fps: 30,
             ..Default::default()
@@ -304,7 +347,7 @@ mod tests {
         assert!((settings.request_interval(100).as_secs_f64() - 1.0 / 30.0).abs() < 0.00001);
         assert_eq!(
             StreamSettings::default().request_interval(1_000_000),
-            Duration::from_secs_f64(1.0 / 60.0)
+            Duration::from_secs_f64(1.0 / 30.0)
         );
     }
 

@@ -29,7 +29,7 @@ Uninstalling the viewer does not erase audit evidence.
 | Application | Version, UTC build timestamp and timestamp source, complete source revision, dirty/archive state, target, Rust compiler, executable path and on-disk SHA-256 |
 | Windows context | Hostname, OS version, process ID/creation time, user SID, logon LUID, Windows session ID, elevation, integrity RID/level |
 | Launch lineage | Windows-reported parent PID, up to eight ancestors, observed image paths and creation times, direct parent's on-disk SHA-256 |
-| Connections | Profile UUID, configured host/port, actual local/remote socket endpoints, protocol, authentication source/type and outcomes, duration, byte totals |
+| Connections | Profile UUID, configured host/port, actual local/remote socket endpoints, protocol, authentication source/type and outcomes, stream-restart requests and generations, duration, byte totals |
 | Consent and vault | Hello requested/completed/denied, safe local denial reasons, credential read/save/delete requests and outcomes; no secret values |
 | SSH trust | Host-key algorithm, SHA-256 fingerprint, first-use approval/pinning, changed-key blocks before credential access |
 | HEVC | Authentication/control/media negotiation stages, codec and geometry, actual first decoded frame, safe RTP/reassembly counters, keyframe recovery and decode failures; no keys, encoded payloads, or images |

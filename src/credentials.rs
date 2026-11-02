@@ -38,6 +38,7 @@ pub trait ConsentVerifier {
     fn verify(&self) -> Result<()>;
 }
 
+#[derive(Clone)]
 pub enum CredentialSource {
     Manual(Credentials),
     Saved,
@@ -391,6 +392,40 @@ mod tests {
             .is_err()
         );
         assert_eq!(*calls.borrow(), ["hello", "read", "hello"]);
+    }
+
+    #[test]
+    fn cloning_a_reconnect_source_cannot_cache_saved_secrets_or_hello_consent() {
+        let calls = RefCell::new(Vec::new());
+        let source = CredentialSource::Saved;
+        let profile = Uuid::new_v4();
+        resolve(
+            profile,
+            source.clone(),
+            &Consent(&calls, true),
+            &Store(&calls),
+        )
+        .unwrap();
+        assert!(resolve(profile, source, &Consent(&calls, false), &Store(&calls)).is_err());
+        assert_eq!(*calls.borrow(), ["hello", "read", "hello"]);
+    }
+
+    #[test]
+    fn unsaved_reconnect_credentials_never_use_the_vault() {
+        let calls = RefCell::new(Vec::new());
+        let source = CredentialSource::Manual(Credentials::new("fixture".into(), "fixture".into()));
+        for reconnect in [source.clone(), source] {
+            let credentials = resolve(
+                Uuid::new_v4(),
+                reconnect,
+                &Consent(&calls, false),
+                &Store(&calls),
+            )
+            .unwrap();
+            assert_eq!(credentials.username(), "fixture");
+            assert_eq!(credentials.password(), "fixture");
+        }
+        assert!(calls.borrow().is_empty());
     }
 
     #[test]

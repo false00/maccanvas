@@ -267,6 +267,23 @@ mod tests {
     }
 
     #[test]
+    fn fresh_settings_use_hevc30_and_explicit_existing_choices_are_preserved() {
+        use crate::streaming::Encoding;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let fresh = Settings::load(&path).unwrap();
+        assert_eq!(fresh.streaming.encoding, Encoding::Hevc30);
+        assert_eq!(fresh.streaming.max_fps, 30);
+        for encoding in [Encoding::Auto, Encoding::Zrle, Encoding::Hevc60] {
+            let mut existing = fresh.clone();
+            existing.streaming.encoding = encoding;
+            existing.streaming.max_fps = 60;
+            existing.save(&path).unwrap();
+            assert_eq!(Settings::load(&path).unwrap().streaming, existing.streaming);
+        }
+    }
+
+    #[test]
     fn rejects_credentials_in_host_urls() {
         let profile = Profile {
             id: Uuid::new_v4(),

@@ -148,6 +148,9 @@ class Fixture:
         self.stop = threading.Event()
         self.authenticated = threading.Event()
         self.pause_updates = threading.Event()
+        self.expect_restart = threading.Event()
+        self.restart_started = threading.Event()
+        self.restart_continue = threading.Event()
         self.pointers = []
         self.keys = []
         self.offers = []
@@ -216,11 +219,33 @@ class Fixture:
                         self.pointers.append(struct.unpack("!BHH", read(connection, 5)))
                     else:
                         raise AssertionError(f"Unrequested client message: {kind}")
-        except (EOFError, ConnectionResetError):
-            if not self.stop.is_set():
+        except (EOFError, ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+            if self.expect_restart.is_set():
+                self.restart_probe()
+            elif not self.stop.is_set():
                 self.error = AssertionError("Viewer closed the fixture unexpectedly")
         except Exception as error:
             self.error = error
+
+    def restart_probe(self):
+        try:
+            connection, _ = self.listener.accept()
+            with connection:
+                connection.settimeout(15)
+                connection.sendall(b"RFB 003.889\n")
+                assert read(connection, 12) == b"RFB 003.889\n"
+                self.restart_started.set()
+                while not self.restart_continue.wait(0.05):
+                    if self.stop.is_set():
+                        return
+                    if select.select([connection], [], [], 0)[0]:
+                        assert connection.recv(1) == b"", "Credentials sent before security negotiation"
+                        return
+                connection.sendall(b"\x01\x1e")
+                assert connection.recv(1) == b"", "Unsupported HEVC authentication must not receive credentials"
+        except Exception as error:
+            if not self.stop.is_set():
+                self.error = error
 
 
 def native_window(pid):
@@ -287,7 +312,7 @@ def wait(predicate, process, fixture, description, timeout=20):
     raise AssertionError(f"Timed out: {description}; recent fixture pointer events: {fixture.pointers[-5:]}")
 
 
-def main(executable, native_messages=False, ssh_fixture_executable=None):
+def main(executable, native_messages=False, ssh_fixture_executable=None, cancel_switch=False):
     fixture = Fixture()
     thread = threading.Thread(target=fixture.run, daemon=True)
     thread.start()
@@ -449,6 +474,30 @@ def main(executable, native_messages=False, ssh_fixture_executable=None):
             assert -253 in fixture.offers[-1]
             assert "dark_theme" not in configuration and "hello_for_all_connections" not in configuration
             print("PASS: profiles contain neither username nor password")
+            fixture.expect_restart.set()
+            fixture.pause_updates.clear()
+            automate(process.pid, fixture.port, "switch-stream", ("-StreamMode", "hevc60"))
+            wait(fixture.restart_started.is_set, process, fixture,
+                 "automatic same-endpoint VNC teardown and HEVC reopen")
+            if cancel_switch:
+                automate(process.pid, fixture.port, "cancel")
+            else:
+                fixture.restart_continue.set()
+            def disconnected():
+                names = [entry["name"] for entry in automate(process.pid, fixture.port, "telemetry")]
+                return "Disconnected" in names
+            wait(disconnected, process, fixture, "cancelled or failed automatic reconnect cleanup")
+            time.sleep(1)
+            assert fixture.error is None, fixture.error
+            assert not select.select([fixture.listener], [], [], 0)[0], "Reconnect unexpectedly retried"
+            after = json.loads((Path(data) / "settings.json").read_text())
+            assert after["streaming"]["encoding"] == "hevc60"
+            assert after["streaming"]["max_fps"] == 60
+            assert after["profiles"][0]["host"] == "127.0.0.1"
+            assert after["profiles"][0]["port"] == fixture.port
+            print("PASS: HEVC30 defaults, automatic same-Mac restart, matching preset FPS, "
+                  + ("cancellation" if cancel_switch else "explicit negotiation failure")
+                  + " and no retry loop")
         finally:
             user32.SetPhysicalCursorPos(original.x, original.y)
             fixture.stop.set()
@@ -493,6 +542,16 @@ def main(executable, native_messages=False, ssh_fixture_executable=None):
             assert resource["user.id"].startswith("S-1-")
             assert "fixture-password" not in audit_text and "fixture-user" not in audit_text
             assert "FixturePassword-DoNotPutInLogs" not in audit_text
+            names = [record["event_name"] for record in records]
+            assert names.count("session.reconnect.requested") == 1
+            requests = [record for record in records if record["event_name"] == "session.connection.requested"]
+            assert len(requests) == 2
+            assert requests[0]["attributes"]["profile.id"] == requests[1]["attributes"]["profile.id"]
+            assert requests[1]["attributes"]["credential.source"] == "manual"
+            assert requests[1]["attributes"]["rfb.streaming"]["encoding"] == "hevc60"
+            assert names.index("session.connection.closed") < names.index(
+                "session.connection.requested", names.index("session.connection.requested") + 1
+            )
             if ssh_info is not None:
                 assert "ssh.host_key.pinned" in audit_text
                 assert audit_text.count('"file.dialog.cancelled"') >= 2
@@ -508,6 +567,8 @@ if __name__ == "__main__":
     parser.add_argument("--executable", type=Path, default=ROOT / "target" / "x86_64-pc-windows-msvc" / "debug" / "maccanvas.exe")
     parser.add_argument("--native-messages", action="store_true", help="Dispatch native test messages without requiring foreground keyboard ownership")
     parser.add_argument("--ssh-fixture-executable", type=Path, help="Owned Rust integration-test executable providing the bounded SSH fixture")
+    parser.add_argument("--cancel-switch", action="store_true", help="Cancel the owned automatic transport restart instead of rejecting negotiation")
     arguments = parser.parse_args()
     main(arguments.executable.resolve(), arguments.native_messages,
-         arguments.ssh_fixture_executable.resolve() if arguments.ssh_fixture_executable else None)
+         arguments.ssh_fixture_executable.resolve() if arguments.ssh_fixture_executable else None,
+         arguments.cancel_switch)

@@ -137,14 +137,14 @@ export component App inherits Window {
     in property <string> fps-text: "0 FPS";
     in property <[TrafficBar]> traffic;
     in property <string> active-encoding: "Waiting for pixels";
-    in-out property <int> encoding-index: 0;
+    in-out property <int> encoding-index: 9;
     in-out property <float> compression-level: 6;
     in-out property <float> jpeg-quality: 8;
     in-out property <bool> manual-bandwidth: false;
     in-out property <string> target-mbps: "10";
-    in-out property <string> max-fps: "60";
+    in-out property <string> max-fps: "30";
     in property <string> encoding-description;
-    in property <string> bandwidth-description: "Default: Automatic (no bandwidth target), lossless Auto, compression 6, up to 60 updates/s.";
+    in property <string> bandwidth-description: "Default: HEVC / H.265, adaptive bitrate, up to 30 FPS.";
     in property <[CodecGuide]> codec-guide;
     in property <string> estimate-context;
     in-out property <bool> quality-open: false;
@@ -527,11 +527,12 @@ export component App inherits Window {
                 ScrollView {
                     if !root.help-open : VerticalLayout {
                         spacing: 12px; padding-right: 8px;
-                        Text { text: "Default: Auto (lossless), compression 6, no bandwidth target, 60 FPS maximum."; color: root.muted; font-size: 12px; wrap: word-wrap; }
+                        Text { text: "Default: HEVC / H.265 at up to 30 FPS, with adaptive bitrate."; color: root.muted; font-size: 12px; wrap: word-wrap; }
                         Caption { text: "Streaming mode"; }
                         ComboBox {
-                            accessible-label: "Compression method";
-                            model: ["Auto (recommended, lossless)", "ZRLE (lossless)", "Tight (lossless)", "Tight + JPEG (lossy)", "Hextile (lossless)", "Zlib (lossless)", "RRE (legacy)", "CoRRE (legacy)", "Raw (uncompressed)", "HEVC / H.265 - 30 FPS", "HEVC / H.265 - 60 FPS"];
+                            accessible-label: "Streaming mode";
+                            accessible-action-set-value(value) => { self.current-value = value; }
+                            model: ["Auto (lossless VNC)", "ZRLE (lossless)", "Tight (lossless)", "Tight + JPEG (lossy)", "Hextile (lossless)", "Zlib (lossless)", "RRE (legacy)", "CoRRE (legacy)", "Raw (uncompressed)", "HEVC / H.265 - 30 FPS (default)", "HEVC / H.265 - 60 FPS"];
                             current-index <=> root.encoding-index;
                         }
                         Text { text: root.encoding-description; color: root.muted; font-size: 12px; wrap: word-wrap; }
@@ -550,7 +551,7 @@ export component App inherits Window {
                             Caption { text: "Target (Mbps)"; }
                             LineEdit { accessible-label: "Bandwidth target Mbps"; text <=> root.target-mbps; input-type: InputType.decimal; }
                         }
-                        Text { text: root.encoding-index >= 9 ? "HEVC negotiates adaptive video over encrypted UDP. Rectangle compression, JPEG quality and the VNC request-bandwidth target do not apply. This field can reduce the local display rate below the selected 30/60 FPS preset. Reconnect to change transports or HEVC presets." : "Automatic means no bandwidth target. A manual target spaces out screen requests based on received bytes. Bursts can exceed it; it cannot force a Mac to use a fixed bitrate. Mouse and keyboard stay responsive."; color: root.muted; font-size: 12px; wrap: word-wrap; }
+                        Text { text: root.encoding-index >= 9 ? "HEVC negotiates adaptive video over encrypted UDP. Compression, JPEG quality and the VNC bandwidth target do not apply. The limit below can reduce the local display rate. Apply reconnects automatically when changing transports or HEVC presets; saved logins require Windows Hello again." : "Automatic means no bandwidth target. A manual target spaces screen requests based on received bytes; bursts can exceed it. Apply reconnects automatically when switching to or from HEVC. Other VNC changes apply live."; color: root.muted; font-size: 12px; wrap: word-wrap; }
                         HorizontalLayout {
                             Caption { text: "Maximum updates / second"; }
                             LineEdit { accessible-label: "Maximum FPS"; width: 88px; text <=> root.max-fps; input-type: InputType.number; }
@@ -577,7 +578,7 @@ export component App inherits Window {
                 HorizontalLayout {
                     Button { text: root.help-open ? "Back to quality" : "Restore defaults"; clicked => { if root.help-open { root.help-open = false; } else { root.reset-streaming(); } } }
                     Rectangle { background: transparent; horizontal-stretch: 1; }
-                    if !root.help-open : Button { text: "Apply"; primary: true; clicked => { root.apply-streaming(); } }
+                    if !root.help-open : Button { text: "Apply"; primary: true; enabled: !root.connecting && !root.update-installing && root.audit-error == ""; clicked => { root.apply-streaming(); } }
                 }
             }
         }

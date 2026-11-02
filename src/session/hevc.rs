@@ -108,6 +108,7 @@ pub(super) fn run(
         };
         if let Some(frame) = frame {
             if let Some(mut connected) = profile.take() {
+                let mut credentials_saved = false;
                 if request.remember
                     && let Some(credentials) = &credentials
                 {
@@ -116,7 +117,10 @@ pub(super) fn run(
                     })
                     .save(connected.id, credentials)
                     {
-                        Ok(()) => connected.has_saved_credentials = true,
+                        Ok(()) => {
+                            connected.has_saved_credentials = true;
+                            credentials_saved = true;
+                        }
                         Err(error) => events
                             .send((
                                 request.generation,
@@ -142,6 +146,7 @@ pub(super) fn run(
                         Event::Connected {
                             profile: connected,
                             server_name: client.info.name.clone(),
+                            credentials_saved,
                         },
                     ))
                     .map_err(|_| Error::Protocol("Connection window closed".into()))?;

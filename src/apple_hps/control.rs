@@ -184,7 +184,7 @@ impl Channel {
         stream.read_exact(&mut format)?;
         let name_size = integer(&mut stream)? as usize;
         let name =
-            String::from_utf8_lossy(&read_bytes(&mut stream, name_size, 1_048_576)?).into_owned();
+            crate::protocol::desktop_name(&read_bytes(&mut stream, name_size, 1_048_576)?, true)?;
         stream.write_all(&viewer_info())?;
         stream.write_all(&[0x12, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 1])?;
         stream.flush()?;

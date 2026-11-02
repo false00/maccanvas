@@ -61,21 +61,22 @@ or bypass Windows application-control policies.
    Credentials are saved only after a successful login.
 
 **VNC password** is for the separate password configured in Screen Sharing,
-not the Mac account password. If necessary, use your macOS short username.
+not the Mac account password; select a lossless VNC mode in **Quality** to use it.
+If necessary, use your macOS short username.
 
 Use a VPN for internet access. **Never expose port 5900 publicly.** Standard
 Mac VNC screen and input traffic is not encrypted, even with Mac account login.
 
 ## Quality and statistics
 
-Open **Quality** before or during a connection. Defaults are **Auto lossless,
-compression 6, no bandwidth target, and a 60-update/s maximum**.
+Open **Quality** before or during a connection. The default is **HEVC / H.265
+at up to 30 FPS**, with adaptive bitrate. Existing saved choices are preserved.
 
 Supported methods: **ZRLE, Tight, Tight + JPEG, Hextile, Zlib, RRE, CoRRE, Raw**,
 plus CopyRect. The in-app guide explains CPU cost, image quality, and illustrative
 bandwidth ranges. The Mac can choose a fallback or ignore compression hints.
-For motion, choose **HEVC / H.265 - 30 FPS** or **60 FPS** in **Quality** before
-connecting with **Mac account** login. HEVC needs a compatible Apple-silicon Mac
+Choose **30 FPS** for lower decoding load or **60 FPS** for smoother motion.
+HEVC uses **Mac account** login and needs a compatible Apple-silicon Mac
 running macOS 14 or later and UDP access on the VNC port and the next port
 (normally `5900` and `5901`). It shares the physical desktop without changing
 the Mac's resolution or installing a Mac helper. Native CPU decoding is bundled;
@@ -84,7 +85,9 @@ no Windows codec extension is required.
 The HEVC presets request different frame-rate ceilings, not fixed bitrates.
 Actual FPS depends on the Mac, network, and Windows decoding capacity. The VNC
 compression/JPEG and request-bandwidth controls do not apply to HEVC.
-Disconnect before changing transports or HEVC presets. H.264 playback is not supported.
+**Apply** reconnects the current Mac automatically when switching transports or
+HEVC presets; saved logins require fresh Windows Hello approval. Other quality
+changes apply live. H.264 playback is not supported.
 
 A bandwidth target paces screen requests; **it is not a guaranteed bitrate cap**.
 Bursts can exceed it. Keyboard and mouse input are not throttled.
@@ -114,6 +117,8 @@ Every [saved-login attempt](docs/images/saved-login.png), including SSH, require
 If Hello is unavailable or cancelled, the app neither reads nor sends the saved password.
 SSH verifies the host key before requesting Hello.
 You may instead enter credentials manually; this does not unlock the saved login.
+Unsaved credentials stay in zeroizing process memory only while connected, so
+stream-mode changes can reconnect without saving them. Disconnecting clears them.
 
 Delete a Mac in the app to remove its saved credential. Saved logins are tied to
 their original address. Hello is an app approval gate, not extra vault encryption:

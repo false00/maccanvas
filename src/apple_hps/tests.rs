@@ -194,8 +194,12 @@ fn encrypted_apple_peer_decodes_real_hevc_and_preserves_input_and_hello_gates() 
         info.extend_from_slice(&64_u16.to_be_bytes());
         info.extend_from_slice(&48_u16.to_be_bytes());
         info.extend_from_slice(&crate::protocol::PIXEL_FORMAT);
-        info.extend_from_slice(&12_u32.to_be_bytes());
-        info.extend_from_slice(b"HEVC fixture");
+        let name = "HEVC \u{2019} fixture";
+        let mut extended_name = vec![0; 22];
+        extended_name[5..11].copy_from_slice(&[0x02, 0x80, 0xff, 0x81, 0x7f, 0xfe]);
+        extended_name.extend_from_slice(name.as_bytes());
+        info.extend_from_slice(&(extended_name.len() as u32).to_be_bytes());
+        info.extend_from_slice(&extended_name);
         socket.write_all(&info).unwrap();
         let mut prelude = [0; 78];
         socket.read_exact(&mut prelude).unwrap();
@@ -300,7 +304,15 @@ fn encrypted_apple_peer_decodes_real_hevc_and_preserves_input_and_hello_gates() 
             .unwrap()
             .1
         {
-            Event::Connected { .. } => break,
+            Event::Connected {
+                server_name,
+                credentials_saved,
+                ..
+            } => {
+                assert_eq!(server_name, "HEVC \u{2019} fixture");
+                assert!(!credentials_saved);
+                break;
+            }
             Event::Error(error) => panic!("HEVC fixture failed: {error}"),
             _ => (),
         }
@@ -324,7 +336,10 @@ fn encrypted_apple_peer_decodes_real_hevc_and_preserves_input_and_hello_gates() 
     assert!(session.share_clipboard(true).is_err());
     assert!(
         session
-            .send(Command::Configure(StreamSettings::default()))
+            .send(Command::Configure(StreamSettings {
+                encoding: Encoding::Auto,
+                ..Default::default()
+            }))
             .is_err()
     );
     session

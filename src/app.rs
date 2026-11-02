@@ -38,6 +38,11 @@ use maccanvas::{
 
 use crate::{App, CodecGuide, Machine, TrafficBar};
 
+struct Reconnect {
+    profile: Profile,
+    credentials: CredentialSource,
+}
+
 struct State {
     settings: Settings,
     path: PathBuf,
@@ -45,6 +50,8 @@ struct State {
     selected: Option<usize>,
     session: Option<Session>,
     connection_profile: Option<Profile>,
+    connection_credentials: Option<CredentialSource>,
+    reconnect: Option<Reconnect>,
     files: files_ui::Files,
     retired: Vec<Session>,
     audit: Scope,
@@ -332,6 +339,17 @@ fn refresh_layout(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
 }
 
 fn disconnect(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
+    let result = close_stream(app, state);
+    {
+        let mut state = state.borrow_mut();
+        state.connection_profile = None;
+        state.files.stop(app);
+    }
+    app.set_files_open(false);
+    result
+}
+
+fn close_stream(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
     let result = {
         let mut state = state.borrow_mut();
         let release = state.release();
@@ -343,8 +361,8 @@ fn disconnect(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
         state.monitor = Monitor::new(Instant::now());
         state.frame_number = 0;
         state.last_displayed_frame = 0;
-        state.connection_profile = None;
-        state.files.stop(app);
+        state.connection_credentials = None;
+        state.reconnect = None;
         state.clipboard = native::Watcher::default();
         state.pending_clipboard = None;
         state
@@ -370,8 +388,8 @@ fn disconnect(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
     app.set_clipboard_shared(state.borrow().settings.clipboard_enabled);
     app.set_connecting(false);
     app.set_clipboard_open(false);
-    app.set_files_open(false);
     app.set_frame_image(slint::Image::default());
+    app.set_active_encoding("Waiting for pixels".into());
     app.set_status("Disconnected".into());
     app.set_desktop_description("".into());
     app.set_download_rate("0.0 kbps".into());
@@ -381,6 +399,156 @@ fn disconnect(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
         vec![TrafficBar::default(); telemetry::HISTORY],
     ))));
     result
+}
+
+fn start_connection(
+    app: &App,
+    state: &mut State,
+    profile: Profile,
+    credentials: CredentialSource,
+    remember: bool,
+    events: &mpsc::Sender<(u64, Event)>,
+) -> Result<()> {
+    if state.updater.installing {
+        return Err(Error::Update(
+            "Finish the application update before connecting".into(),
+        ));
+    }
+    if state.session.is_some() || state.reconnect.is_some() {
+        return Err(Error::Protocol("A connection is already active".into()));
+    }
+    if state.retired.len() >= 8 {
+        return Err(Error::Protocol(
+            "Wait for the previous connections to finish closing".into(),
+        ));
+    }
+    profile.validate()?;
+    state
+        .settings
+        .streaming
+        .validate_authentication(profile.authentication)?;
+    let hwnd = window_handle(app)?;
+    let reconnect_credentials = credentials.clone();
+    state.generation += 1;
+    state.frames = Arc::new(Mutex::new(None));
+    state.monitor = Monitor::new(Instant::now());
+    state.frame_number = 0;
+    state.last_displayed_frame = 0;
+    state.clipboard = native::Watcher::default();
+    state.pending_clipboard = None;
+    state.network_logged = Instant::now();
+    state.files.reset_network();
+    let request = Request {
+        audit: state.audit.child(json!({
+            "profile.id":profile.id, "server.address":profile.host, "server.port":profile.port,
+            "vnc.session.generation":state.generation,
+        })),
+        clipboard: state.settings.clipboard_enabled,
+        profile: profile.clone(),
+        credentials,
+        streaming: state.settings.streaming,
+        remember,
+        window: hwnd,
+        generation: state.generation,
+    };
+    let session = Session::start(request, events.clone(), state.frames.clone())?;
+    state.connection_profile = Some(profile);
+    state.connection_credentials = Some(reconnect_credentials);
+    state.session = Some(session);
+    app.set_error_text("".into());
+    app.set_connecting(true);
+    app.set_status("Verifying and connecting...".into());
+    Ok(())
+}
+
+fn apply_streaming(app: &App, state: &Rc<RefCell<State>>, settings: StreamSettings) -> Result<()> {
+    if app.get_connecting() {
+        return Err(Error::Configuration(
+            "Finish or cancel the current connection before applying stream settings".into(),
+        ));
+    }
+    let reconnect = {
+        let mut state = state.borrow_mut();
+        let reconnect = if state
+            .session
+            .as_ref()
+            .is_some_and(|session| session.requires_reconnect(settings))
+        {
+            let profile = state.connection_profile.clone().ok_or_else(|| {
+                Error::Protocol("The active connection profile is unavailable".into())
+            })?;
+            settings.validate_authentication(profile.authentication)?;
+            let credentials = state.connection_credentials.clone().ok_or_else(|| {
+                Error::Credential("The active connection cannot be restarted".into())
+            })?;
+            state.audit.critical(
+                "session.reconnect.requested",
+                Level::Info,
+                json!({
+                    "profile.id":profile.id, "rfb.streaming.previous":state.settings.streaming,
+                    "rfb.streaming":settings, "vnc.session.generation":state.generation,
+                }),
+            )?;
+            Some(Reconnect {
+                profile,
+                credentials,
+            })
+        } else {
+            None
+        };
+        let previous = state.settings.streaming;
+        state.settings.streaming = settings;
+        if let Err(error) = state.persist() {
+            state.settings.streaming = previous;
+            return Err(error);
+        }
+        if reconnect.is_none()
+            && let Some(session) = &state.session
+        {
+            session.send(Command::Configure(settings))?;
+        }
+        reconnect
+    };
+    if let Some(reconnect) = reconnect {
+        close_stream(app, state)?;
+        state.borrow_mut().reconnect = Some(reconnect);
+        app.set_connecting(true);
+        app.set_status(format!("Switching to {}...", settings.encoding.label()).into());
+    }
+    stream_summary(app, settings);
+    app.set_quality_open(false);
+    app.set_error_text("".into());
+    Ok(())
+}
+
+fn tick_reconnect(
+    app: &App,
+    state: &Rc<RefCell<State>>,
+    events: &mpsc::Sender<(u64, Event)>,
+) -> Result<()> {
+    let pending = {
+        let mut state = state.borrow_mut();
+        if state.retired.is_empty() {
+            state.reconnect.take()
+        } else {
+            None
+        }
+    };
+    if let Some(pending) = pending {
+        let result = start_connection(
+            app,
+            &mut state.borrow_mut(),
+            pending.profile,
+            pending.credentials,
+            false,
+            events,
+        );
+        if let Err(error) = result {
+            disconnect(app, state)?;
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 fn paste_windows(app: &App, state: &mut State) -> Result<()> {
@@ -782,6 +950,8 @@ pub fn run(
         selected: None,
         session: None,
         connection_profile: None,
+        connection_credentials: None,
+        reconnect: None,
         files: files_ui::Files::default(),
         retired: Vec::new(),
         audit,
@@ -811,22 +981,12 @@ pub fn run(
     model(&app, &state.borrow());
     let weak = app.as_weak();
     let connection_state = state.clone();
+    let connection_events = events.clone();
     app.on_connect_requested(move || {
         let Some(app) = weak.upgrade() else { return };
         let result = (|| -> Result<()> {
             let mut state = connection_state.borrow_mut();
-            if state.updater.installing {
-                return Err(Error::Update(
-                    "Finish the application update before connecting".into(),
-                ));
-            }
-            if state.session.is_some() {
-                return Err(Error::Protocol("A connection is already active".into()));
-            }
             let profile = profile_from_form(&app, &state)?;
-            if state.retired.len() >= 8 {
-                return Err(Error::Protocol("Wait for the previous connections to finish closing".into()));
-            }
             let source = if app.get_use_saved() {
                 CredentialSource::Saved
             } else {
@@ -837,33 +997,14 @@ pub fn run(
                 credentials.validate(profile.authentication)?;
                 CredentialSource::Manual(credentials)
             };
-            let hwnd = window_handle(&app)?;
-            state.generation += 1;
-            state.frames = Arc::new(Mutex::new(None));
-            state.monitor = Monitor::new(Instant::now());
-            state.frame_number = 0;
-            state.last_displayed_frame = 0;
-            state.clipboard = native::Watcher::default();
-            state.pending_clipboard = None;
-            state.network_logged = Instant::now();
-            state.files.reset_network();
-            state.connection_profile = Some(profile.clone());
-            let request = Request {
-                audit: state.audit.child(json!({"profile.id":profile.id, "server.address":profile.host, "server.port":profile.port})),
-                clipboard: state.settings.clipboard_enabled,
+            start_connection(
+                &app,
+                &mut state,
                 profile,
-                credentials: source,
-                streaming: state.settings.streaming,
-                remember: app.get_remember_password() && !app.get_use_saved(),
-                window: hwnd,
-                generation: state.generation,
-            };
-            state.session = Some(Session::start(
-                request,
-                events.clone(),
-                state.frames.clone(),
-            )?);
-            Ok(())
+                source,
+                app.get_remember_password() && !app.get_use_saved(),
+                &connection_events,
+            )
         })();
         app.set_password("".into());
         app.set_username("".into());
@@ -899,7 +1040,7 @@ pub fn run(
         let Some(app) = weak.upgrade() else { return };
         let result = (|| -> Result<()> {
             let mut state = update_state.borrow_mut();
-            if state.session.is_some() || state.files.active() {
+            if state.session.is_some() || state.reconnect.is_some() || state.files.active() {
                 return Err(Error::Update(
                     "Disconnect from the Mac and wait for SSH cleanup before updating and restarting".into(),
                 ));
@@ -1084,7 +1225,13 @@ pub fn run(
     app.on_quality_changed(move || {
         if let Some(app) = weak.upgrade() {
             match Encoding::from_index(app.get_encoding_index()) {
-                Ok(encoding) => app.set_encoding_description(encoding.description().into()),
+                Ok(encoding) => {
+                    app.set_encoding_description(encoding.description().into());
+                    if app.get_quality_open() && encoding.is_hevc() {
+                        app.set_max_fps(encoding.fps_ceiling().to_string().into());
+                        app.set_manual_bandwidth(false);
+                    }
+                }
                 Err(error) => notify(&app, error),
             }
         }
@@ -1093,23 +1240,10 @@ pub fn run(
     let quality_state = state.clone();
     app.on_apply_streaming(move || {
         let Some(app) = weak.upgrade() else { return };
-        let result = (|| -> Result<StreamSettings> {
-            let settings = read_stream_form(&app)?;
-            let mut state = quality_state.borrow_mut();
-            if let Some(session) = state.session.as_ref() {
-                session.send(Command::Configure(settings))?;
-            }
-            state.settings.streaming = settings;
-            state.persist()?;
-            Ok(settings)
-        })();
-        match result {
-            Ok(settings) => {
-                stream_summary(&app, settings);
-                app.set_quality_open(false);
-                app.set_error_text("".into());
-            }
-            Err(error) => notify(&app, error),
+        let result = read_stream_form(&app)
+            .and_then(|settings| apply_streaming(&app, &quality_state, settings));
+        if let Err(error) = result {
+            notify(&app, error);
         }
     });
     let weak = app.as_weak();
@@ -1399,9 +1533,13 @@ pub fn run(
                     Event::Connected {
                         profile,
                         server_name,
+                        credentials_saved,
                     } => {
                         let saved = {
                             let mut state = timer_state.borrow_mut();
+                            if credentials_saved {
+                                state.connection_credentials = Some(CredentialSource::Saved);
+                            }
                             state.connection_profile = Some(profile.clone());
                             if let Some(index) = state
                                 .settings
@@ -1447,13 +1585,20 @@ pub fn run(
                 {
                     let mut state = timer_state.borrow_mut();
                     while let Some(index) = state.retired.iter().position(Session::is_finished) {
-                        state.retired.remove(index).finish()?;
+                        if let Err(error) = state.retired.remove(index).finish() {
+                            state.reconnect = None;
+                            app.set_connecting(false);
+                            return Err(error);
+                        }
                     }
                     if let Some(error) = state.audit.audit().failure()
                         && !state.audit_reported
                     {
                         state.audit_reported = true;
                         let closed = state.session.as_ref().map(Session::close).transpose();
+                        state.reconnect = None;
+                        state.connection_credentials = None;
+                        app.set_connecting(false);
                         state.files.stop(&app);
                         let mut message = format!("Security logging failed. Connections are disabled until MacCanvas is restarted. {error}");
                         if let Err(error) = closed { message.push_str(&format!(" Socket cleanup also reported: {error}")); }
@@ -1461,6 +1606,7 @@ pub fn run(
                         notify(&app, Error::Audit(message));
                     }
                 }
+                tick_reconnect(&app, &timer_state, &events)?;
                 tick_clipboard(&app, &mut timer_state.borrow_mut())?;
                 files_ui::tick(&app,&mut timer_state.borrow_mut())?;
                 let frame = timer_state

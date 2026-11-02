@@ -4,7 +4,8 @@ param(
     [int]$Port,
     [int]$SshPort,
     [string]$SshFingerprint,
-    [ValidateSet('connect', 'bounds', 'fullscreen', 'exit-fullscreen', 'disconnect', 'focus', 'toggle-sidebar', 'telemetry', 'quality', 'manual-quality', 'close-quality', 'show-macs', 'new', 'saved-login-check', 'panels', 'ssh-dialogs')][string]$Action = 'bounds'
+    [ValidateSet('auto', 'hevc30', 'hevc60')][string]$StreamMode = 'auto',
+    [ValidateSet('connect', 'bounds', 'fullscreen', 'exit-fullscreen', 'disconnect', 'cancel', 'switch-stream', 'focus', 'toggle-sidebar', 'telemetry', 'quality', 'manual-quality', 'close-quality', 'show-macs', 'new', 'saved-login-check', 'panels', 'ssh-dialogs')][string]$Action = 'bounds'
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient
@@ -26,7 +27,43 @@ function Find-FixtureElement([string]$Name, $Type) {
     if ($null -eq $element) { throw "Test control was not found: $Name" }
     return $element
 }
+function Set-FixtureStreamMode([string]$Mode) {
+    $labels = @{
+        auto = 'Auto (lossless VNC)'
+        hevc30 = 'HEVC / H.265 - 30 FPS (default)'
+        hevc60 = 'HEVC / H.265 - 60 FPS'
+    }
+    $combo = Find-FixtureElement 'Streaming mode' ([Windows.Automation.ControlType]::ComboBox)
+    $value = $combo.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern)
+    $value.SetValue($labels[$Mode])
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    while ($value.Current.Value -cne $labels[$Mode] -and [DateTime]::UtcNow -lt $deadline) {
+        Start-Sleep -Milliseconds 50
+    }
+    if ($value.Current.Value -cne $labels[$Mode]) { throw 'The streaming selector did not change.' }
+    if ($Mode -ne 'auto') {
+        $fps = (Find-FixtureElement 'Maximum FPS' ([Windows.Automation.ControlType]::Edit)).
+            GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern)
+        $expected = if ($Mode -ceq 'hevc60') { '60' } else { '30' }
+        $deadline = [DateTime]::UtcNow.AddSeconds(5)
+        while ($fps.Current.Value -cne $expected -and [DateTime]::UtcNow -lt $deadline) {
+            Start-Sleep -Milliseconds 50
+        }
+        if ($fps.Current.Value -cne $expected) { throw 'Selecting the HEVC preset did not update its FPS limit.' }
+    }
+}
 switch ($Action) {
+    'switch-stream' {
+        (Find-FixtureElement 'Stream quality' ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+        Set-FixtureStreamMode $StreamMode
+        (Find-FixtureElement 'Apply' ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+    }
+    'cancel' {
+        (Find-FixtureElement 'Cancel' ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+    }
     'ssh-dialogs' {
         if ($SshPort -le 0 -or -not $SshFingerprint) { throw 'An owned SSH fixture endpoint and fingerprint are required.' }
         Add-Type @'
@@ -233,7 +270,7 @@ public static class MacCanvasOwnedDialogInput {
         $rows = @()
         foreach ($element in $elements) {
             $name = $element.Current.Name
-            if ($name -match '^(Connection status indicator|Connected to |Download rate:|Upload rate:|Live FPS:)') {
+            if ($name -match '^(Connection status indicator|Connected to |Disconnected$|Download rate:|Upload rate:|Live FPS:)') {
                 $r = $element.Current.BoundingRectangle
                 $rows += @{ name = $name; x = $r.X; y = $r.Y; width = $r.Width; height = $r.Height }
             }
@@ -249,6 +286,18 @@ public static class MacCanvasOwnedDialogInput {
     }
     'focus' { $window.SetFocus() }
     'connect' {
+        (Find-FixtureElement 'Stream quality' ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+        $defaultMode = (Find-FixtureElement 'Streaming mode' ([Windows.Automation.ControlType]::ComboBox)).
+            GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).Current.Value
+        $defaultFps = (Find-FixtureElement 'Maximum FPS' ([Windows.Automation.ControlType]::Edit)).
+            GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).Current.Value
+        if ($defaultMode -cne 'HEVC / H.265 - 30 FPS (default)' -or $defaultFps -cne '30') {
+            throw 'A fresh viewer must default to native HEVC at 30 FPS.'
+        }
+        Set-FixtureStreamMode 'auto'
+        (Find-FixtureElement 'Apply' ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
         foreach ($entry in @(
             @('Machine name', 'Fixture Mac'),
             @('Mac address', '127.0.0.1'),

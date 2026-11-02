@@ -31,6 +31,7 @@ pub enum Event {
     Connected {
         profile: Profile,
         server_name: String,
+        credentials_saved: bool,
     },
     Warning(String),
     Error(String),
@@ -108,15 +109,10 @@ enum WriterCommand {
 
 impl Session {
     pub fn start(request: Request, events: Sender<(u64, Event)>, frames: Frames) -> Result<Self> {
-        request.streaming.validate()?;
+        request
+            .streaming
+            .validate_authentication(request.profile.authentication)?;
         let encoding = request.streaming.encoding;
-        if encoding.is_hevc()
-            && request.profile.authentication != crate::profiles::AuthMode::MacLogin
-        {
-            return Err(Error::Configuration(
-                "HEVC requires Mac account login, not a classic VNC password".into(),
-            ));
-        }
         request.audit.critical("session.connection.requested", Level::Info, json!({
             "server.address": request.profile.host, "server.port": request.profile.port,
             "network.transport": "tcp", "network.protocol.name": "rfb",
@@ -195,12 +191,10 @@ impl Session {
 
     pub fn send(&self, command: Command) -> Result<()> {
         if let Command::Configure(settings) = command
-            && (self.encoding.is_hevc() != settings.encoding.is_hevc()
-                || (self.encoding.is_hevc() && self.encoding != settings.encoding))
+            && self.requires_reconnect(settings)
         {
             return Err(Error::Configuration(
-                "Disconnect before changing between VNC and HEVC transports or HEVC FPS presets"
-                    .into(),
+                "Changing transports or HEVC presets requires restarting the stream".into(),
             ));
         }
         self.post(WriterCommand::Input(command))
@@ -208,6 +202,10 @@ impl Session {
 
     pub fn uses_hevc(&self) -> bool {
         self.encoding.is_hevc()
+    }
+
+    pub fn requires_reconnect(&self, settings: StreamSettings) -> bool {
+        self.encoding.requires_reconnect(settings.encoding)
     }
 
     fn post(&self, command: WriterCommand) -> Result<()> {
@@ -372,13 +370,17 @@ fn run(
     }))?;
     stream.inner.set_read_timeout(None)?;
     let mut profile = request.profile;
+    let mut credentials_saved = false;
     if request.remember {
         match (AuditedVault {
             scope: &request.audit,
         })
         .save(profile.id, &credentials)
         {
-            Ok(()) => profile.has_saved_credentials = true,
+            Ok(()) => {
+                profile.has_saved_credentials = true;
+                credentials_saved = true;
+            }
             Err(error) => {
                 if events
                     .send((
@@ -458,6 +460,7 @@ fn run(
             Event::Connected {
                 profile,
                 server_name: info.name,
+                credentials_saved,
             },
         ))
         .map_err(|_| Error::Protocol("Connection window closed".into()))?;
@@ -628,6 +631,7 @@ mod tests {
                 &mut Sink { sent },
                 receiver,
                 StreamSettings {
+                    encoding: crate::streaming::Encoding::Auto,
                     target_kbps: 100,
                     ..Default::default()
                 },
@@ -667,7 +671,10 @@ mod tests {
             write_loop(
                 &mut Sink { sent },
                 receiver,
-                StreamSettings::default(),
+                StreamSettings {
+                    encoding: crate::streaming::Encoding::Auto,
+                    ..Default::default()
+                },
                 &worker_control,
                 |_| Ok(()),
             )
@@ -681,6 +688,7 @@ mod tests {
             .unwrap();
         sender
             .send(WriterCommand::Input(Command::Configure(StreamSettings {
+                encoding: crate::streaming::Encoding::Auto,
                 target_kbps: 100,
                 ..Default::default()
             })))

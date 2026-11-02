@@ -27,6 +27,31 @@ pub struct ServerInfo {
     pub name: String,
 }
 
+pub(crate) fn desktop_name(bytes: &[u8], apple_extended: bool) -> Result<String> {
+    let text = if apple_extended && bytes.starts_with(&[0; 4]) {
+        // Apple's extended ServerInit includes 22 bytes of host metadata before the name.
+        bytes
+            .get(22..)
+            .ok_or_else(|| Error::Protocol("Truncated Apple desktop-name metadata".into()))?
+    } else {
+        bytes
+    };
+    let text = std::str::from_utf8(text)
+        .map_err(|_| Error::Protocol("The server sent an invalid UTF-8 desktop name".into()))?;
+    Ok(text
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .trim()
+        .to_owned())
+}
+
 fn byte(reader: &mut impl Read) -> Result<u8> {
     let mut bytes = [0; 1];
     reader.read_exact(&mut bytes)?;
@@ -106,7 +131,15 @@ pub fn handshake(
     mode: AuthMode,
     credentials: &Credentials,
 ) -> Result<ServerInfo> {
-    handshake_with_settings(stream, mode, credentials, StreamSettings::default())
+    handshake_with_settings(
+        stream,
+        mode,
+        credentials,
+        StreamSettings {
+            encoding: crate::streaming::Encoding::Auto,
+            ..StreamSettings::default()
+        },
+    )
 }
 
 pub fn handshake_with_settings(
@@ -199,7 +232,7 @@ pub fn handshake_with_settings(
     let size = Extent::new(u32::from(u16_be(stream)?), u32::from(u16_be(stream)?))?;
     skip(stream, 16)?;
     let name_length = u32_be(stream)? as usize;
-    let name = String::from_utf8_lossy(&bounded_bytes(stream, name_length, 4096)?).into_owned();
+    let name = desktop_name(&bounded_bytes(stream, name_length, 4096)?, false)?;
     stream.write_all(&[0, 0, 0, 0])?;
     stream.write_all(&PIXEL_FORMAT)?;
     settings.write_encodings(stream)?;
@@ -579,6 +612,35 @@ fn run_length(reader: &mut impl Read, remaining: usize) -> Result<usize> {
 mod tests {
     use super::*;
     use flate2::{Compression, write::ZlibEncoder};
+
+    #[test]
+    fn apple_desktop_metadata_is_not_rendered_as_text() {
+        let mut bytes = vec![0; 22];
+        bytes[5..11].copy_from_slice(&[0x02, 0x80, 0xff, 0x81, 0x7f, 0xfe]);
+        let expected = "Mac\u{2019}s Mac mini";
+        bytes.extend_from_slice(expected.as_bytes());
+        assert_eq!(desktop_name(&bytes, true).unwrap(), expected);
+        assert!(desktop_name(&bytes, false).is_err());
+    }
+
+    #[test]
+    fn desktop_names_preserve_unicode_without_control_characters() {
+        let name = " \0Mac\u{2019}s \u{6771}\u{4eac} \u{1f5a5}\r\n";
+        for extended in [false, true] {
+            assert_eq!(
+                desktop_name(name.as_bytes(), extended).unwrap(),
+                "Mac\u{2019}s \u{6771}\u{4eac} \u{1f5a5}",
+            );
+            assert_eq!(desktop_name(b"Fixture", extended).unwrap(), "Fixture");
+        }
+    }
+
+    #[test]
+    fn malformed_names_are_explicit_protocol_errors_not_replacement_glyphs() {
+        assert!(desktop_name(&[0; 12], true).is_err());
+        assert!(desktop_name(b"Mac\xff", false).is_err());
+        assert_eq!(desktop_name(&[], true).unwrap(), "");
+    }
 
     fn rectangle(encoding: i32, payload: &[u8]) -> Cursor<Vec<u8>> {
         let mut bytes = vec![0, 0, 0, 1, 0, 0, 0, 0, 0, 2, 0, 2];

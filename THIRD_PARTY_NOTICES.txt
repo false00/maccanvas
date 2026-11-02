@@ -12,8 +12,8 @@ https://crates.io/crates/NAME/VERSION
 GNU Affero General Public License v3.0 or later
 ----------------------------------------------------------------------
 Used by:
-  maccanvas 0.4.0 - https://crates.io/crates/maccanvas/0.4.0
-  maccanvas 0.4.0 - https://crates.io/crates/maccanvas/0.4.0
+  maccanvas 0.4.1 - https://crates.io/crates/maccanvas/0.4.1
+  maccanvas 0.4.1 - https://crates.io/crates/maccanvas/0.4.1
   native-hevc 0.1.0 - https://crates.io/crates/native-hevc/0.1.0
 
                     GNU AFFERO GENERAL PUBLIC LICENSE
