@@ -32,6 +32,7 @@ use crate::{
 use serde_json::json;
 
 mod http;
+mod shortcuts;
 
 const REPOSITORY: &str = "false00/maccanvas";
 const ASSET: &str = "MacCanvas-windows-x64.exe";
@@ -181,6 +182,8 @@ struct Receipt {
     repository: String,
     version: String,
     sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shortcuts: Option<bool>,
 }
 
 fn file_hash(path: &Path) -> Result<String> {
@@ -210,18 +213,12 @@ fn write_receipt(path: &Path, receipt: &Receipt) -> Result<()> {
     Ok(())
 }
 
-fn install_at(
-    executable: &Path,
-    source: &Path,
-    release: &Release,
-    replace: impl FnOnce(&Path) -> std::io::Result<()>,
-) -> Result<()> {
-    let parent = executable
+fn read_receipt(executable: &Path) -> Result<Option<Receipt>> {
+    let path = executable
         .parent()
-        .ok_or_else(|| failed("Application has no parent directory"))?;
-    let old_hash = file_hash(executable)?;
-    let receipt_path = parent.join(".maccanvas-install.json");
-    let receipt = match fs::metadata(&receipt_path) {
+        .ok_or_else(|| failed("Application has no parent directory"))?
+        .join(".maccanvas-install.json");
+    match fs::metadata(&path) {
         Ok(metadata) => {
             if metadata.len() > 4096
                 || !executable
@@ -233,21 +230,90 @@ fn install_at(
                     "The managed installation receipt does not match this executable",
                 ));
             }
-            let receipt: Receipt =
-                serde_json::from_slice(&fs::read(&receipt_path)?).map_err(failed)?;
+            let receipt: Receipt = serde_json::from_slice(&fs::read(path)?).map_err(failed)?;
             if receipt.repository != REPOSITORY
                 || !valid_hash(&receipt.sha256)
-                || receipt.sha256.to_ascii_lowercase() != old_hash
+                || receipt.sha256.to_ascii_lowercase() != file_hash(executable)?
             {
                 return Err(failed(
-                    "The installation was changed; refusing to overwrite its receipt",
+                    "The installation was changed; refusing to modify its shortcuts or receipt",
                 ));
             }
-            Some(receipt)
+            Ok(Some(receipt))
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error.into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn maintain_shortcuts_at(
+    executable: &Path,
+    paths: impl FnOnce() -> Result<[PathBuf; 2]>,
+) -> Result<Option<usize>> {
+    let Some(mut receipt) = read_receipt(executable)? else {
+        return Ok(None);
     };
+    if receipt.shortcuts == Some(false) {
+        return Ok(Some(0));
+    }
+    let links = shortcuts::Links::new()?;
+    let paths = paths()?;
+    let enabled = match receipt.shortcuts {
+        Some(enabled) => enabled,
+        // Legacy opt-outs have no policy field and no app-owned shortcuts.
+        None => links.owns_any(executable, &paths)?,
+    };
+    let changed = if enabled {
+        links.repair(executable, &paths)?
+    } else {
+        0
+    };
+    if receipt.shortcuts.is_none() {
+        receipt.shortcuts = Some(enabled);
+        write_receipt(
+            &executable
+                .parent()
+                .ok_or_else(|| failed("Application has no parent directory"))?
+                .join(".maccanvas-install.json"),
+            &receipt,
+        )?;
+    }
+    Ok(Some(changed))
+}
+
+pub fn maintain_shortcuts(scope: &Scope) -> Result<()> {
+    let executable = std::env::current_exe()?;
+    let _lock = UpdateLock::acquire(&executable)?;
+    match maintain_shortcuts_at(&executable, shortcuts::paths) {
+        Ok(Some(changed)) => scope.event(
+            "application.shortcuts.maintained",
+            Level::Info,
+            json!({"process.executable.path":executable,"shortcut.changed_count":changed}),
+        ),
+        Ok(None) => Ok(()),
+        Err(error) => {
+            scope.event(
+                "application.shortcuts.failed",
+                Level::Warn,
+                audit::error_attributes(&error),
+            )?;
+            Err(error)
+        }
+    }
+}
+
+fn install_at(
+    executable: &Path,
+    source: &Path,
+    release: &Release,
+    replace: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<()> {
+    let parent = executable
+        .parent()
+        .ok_or_else(|| failed("Application has no parent directory"))?;
+    let old_hash = file_hash(executable)?;
+    let receipt_path = parent.join(".maccanvas-install.json");
+    let receipt = read_receipt(executable)?;
     let backup = tempfile::Builder::new()
         .prefix(".maccanvas-rollback-")
         .tempfile_in(parent)?;
@@ -260,6 +326,7 @@ fn install_at(
                 repository: old.repository.clone(),
                 version: release.tag.clone(),
                 sha256: release.sha256.clone(),
+                shortcuts: old.shortcuts,
             },
         )?;
     }
@@ -639,30 +706,34 @@ mod tests {
     }
     #[test]
     fn updates_managed_receipt_and_preserves_uninstall_compatibility() {
-        let directory = tempfile::tempdir().unwrap();
-        let executable = directory.path().join("MacCanvas.exe");
-        let staged = directory.path().join("staged.exe");
-        let receipt = directory.path().join(".maccanvas-install.json");
-        fs::write(&executable, b"old fixture").unwrap();
-        write_receipt(
-            &receipt,
-            &Receipt {
-                repository: REPOSITORY.into(),
-                version: "v0.1.1".into(),
-                sha256: file_hash(&executable).unwrap(),
-            },
-        )
-        .unwrap();
-        let (bytes, release) = fixture();
-        fs::write(&staged, &bytes).unwrap();
-        install_at(&executable, &staged, &release, |source| {
-            fs::copy(source, &executable)?;
-            Ok(())
-        })
-        .unwrap();
-        let updated: Receipt = serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
-        assert_eq!(updated.sha256, file_hash(&executable).unwrap());
-        assert_eq!(updated.version, release.tag);
+        for shortcuts in [None, Some(true), Some(false)] {
+            let directory = tempfile::tempdir().unwrap();
+            let executable = directory.path().join("MacCanvas.exe");
+            let staged = directory.path().join("staged.exe");
+            let receipt = directory.path().join(".maccanvas-install.json");
+            fs::write(&executable, b"old fixture").unwrap();
+            write_receipt(
+                &receipt,
+                &Receipt {
+                    repository: REPOSITORY.into(),
+                    version: "v0.1.1".into(),
+                    sha256: file_hash(&executable).unwrap(),
+                    shortcuts,
+                },
+            )
+            .unwrap();
+            let (bytes, release) = fixture();
+            fs::write(&staged, &bytes).unwrap();
+            install_at(&executable, &staged, &release, |source| {
+                fs::copy(source, &executable)?;
+                Ok(())
+            })
+            .unwrap();
+            let updated: Receipt = serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
+            assert_eq!(updated.sha256, file_hash(&executable).unwrap());
+            assert_eq!(updated.version, release.tag);
+            assert_eq!(updated.shortcuts, shortcuts);
+        }
     }
     #[test]
     fn managed_executable_names_follow_windows_case_insensitivity() {
@@ -677,6 +748,7 @@ mod tests {
                 repository: REPOSITORY.into(),
                 version: "v0.1.1".into(),
                 sha256: file_hash(&executable).unwrap(),
+                shortcuts: None,
             },
         )
         .unwrap();
@@ -703,6 +775,7 @@ mod tests {
                 repository: REPOSITORY.into(),
                 version: "v0.1.1".into(),
                 sha256: old_hash.clone(),
+                shortcuts: Some(false),
             },
         )
         .unwrap();
@@ -715,6 +788,7 @@ mod tests {
         );
         let receipt: Receipt = serde_json::from_slice(&fs::read(receipt_path).unwrap()).unwrap();
         assert_eq!(receipt.sha256, old_hash);
+        assert_eq!(receipt.shortcuts, Some(false));
         assert_eq!(file_hash(&executable).unwrap(), old_hash);
     }
 
@@ -732,5 +806,103 @@ mod tests {
             .is_err()
         );
         assert_eq!(fs::read(executable).unwrap(), b"old fixture");
+    }
+
+    #[test]
+    fn managed_startup_repairs_shortcuts_and_migrates_legacy_installs() {
+        for policy in [None, Some(true)] {
+            let directory = tempfile::tempdir().unwrap();
+            let executable = directory.path().join("MacCanvas.exe");
+            let receipt_path = directory.path().join(".maccanvas-install.json");
+            let paths = [
+                directory.path().join("Start menu").join("MacCanvas.lnk"),
+                directory.path().join("Desktop").join("MacCanvas.lnk"),
+            ];
+            fs::write(&executable, b"not executed").unwrap();
+            write_receipt(
+                &receipt_path,
+                &Receipt {
+                    repository: REPOSITORY.into(),
+                    version: "v0.3.0".into(),
+                    sha256: file_hash(&executable).unwrap(),
+                    shortcuts: policy,
+                },
+            )
+            .unwrap();
+            if policy.is_none() {
+                shortcuts::Links::new()
+                    .unwrap()
+                    .repair(&executable, &paths[..1])
+                    .unwrap();
+            }
+            let expected = if policy.is_none() { 1 } else { 2 };
+            assert_eq!(
+                maintain_shortcuts_at(&executable, || Ok(paths.clone())).unwrap(),
+                Some(expected)
+            );
+            assert_eq!(
+                read_receipt(&executable).unwrap().unwrap().shortcuts,
+                Some(true)
+            );
+            fs::remove_file(&paths[1]).unwrap();
+            assert_eq!(
+                maintain_shortcuts_at(&executable, || Ok(paths.clone())).unwrap(),
+                Some(1)
+            );
+            assert_eq!(
+                maintain_shortcuts_at(&executable, || Ok(paths.clone())).unwrap(),
+                Some(0)
+            );
+        }
+    }
+
+    #[test]
+    fn startup_preserves_portable_and_shortcut_free_installs() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("MacCanvas.exe");
+        fs::write(&executable, b"not executed").unwrap();
+        assert_eq!(
+            maintain_shortcuts_at(&executable, || panic!("Portable copies have no shortcuts"))
+                .unwrap(),
+            None
+        );
+        let receipt_path = directory.path().join(".maccanvas-install.json");
+        for policy in [None, Some(false)] {
+            write_receipt(
+                &receipt_path,
+                &Receipt {
+                    repository: REPOSITORY.into(),
+                    version: "v0.3.0".into(),
+                    sha256: file_hash(&executable).unwrap(),
+                    shortcuts: policy,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                maintain_shortcuts_at(&executable, || {
+                    assert!(
+                        policy.is_none(),
+                        "Explicit opt-out must not inspect shortcuts"
+                    );
+                    Ok([
+                        directory.path().join("missing-menu.lnk"),
+                        directory.path().join("missing-desktop.lnk"),
+                    ])
+                })
+                .unwrap(),
+                Some(0)
+            );
+            assert_eq!(
+                read_receipt(&executable).unwrap().unwrap().shortcuts,
+                Some(false)
+            );
+        }
+        fs::write(&executable, b"changed").unwrap();
+        assert!(
+            maintain_shortcuts_at(&executable, || panic!(
+                "Changed installs must not touch links"
+            ))
+            .is_err()
+        );
     }
 }

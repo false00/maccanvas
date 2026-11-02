@@ -729,6 +729,12 @@ pub fn run(
     app.set_build_compiler(maccanvas::RUSTC.into());
     app.set_author_name(maccanvas::AUTHOR.into());
     app.set_log_path(audit.audit().path().to_string_lossy().as_ref().into());
+    if let Err(error) = updates::maintain_shortcuts(&audit) {
+        notify(
+            &app,
+            format!("Could not refresh application shortcuts. {error}"),
+        );
+    }
     let mut updater = Updater::new();
     #[cfg(debug_assertions)]
     if preview_update {

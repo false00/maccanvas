@@ -54,6 +54,13 @@ $null = [IO.Directory]::CreateDirectory($root)
 $managed = Join-Path $root 'managed'
 $unrelated = Join-Path $root 'unrelated'
 $null = [IO.Directory]::CreateDirectory($unrelated)
+$menuDirectory = Join-Path $root 'Start menu'
+$desktopDirectory = Join-Path $root 'Desktop'
+function Get-MacCanvasShortcutPaths {
+    Join-Path $menuDirectory 'MacCanvas.lnk'
+    Join-Path $desktopDirectory 'MacCanvas.lnk'
+}
+$shortcutPaths = @(Get-MacCanvasShortcutPaths)
 try {
     foreach ($path in @('relative', 'C:\', '\\host\share', 'C:\Temp\..\elsewhere', 'C:\Temp\CON.txt', 'C:\Temp\app.exe:secret', 'C:\Temp\ambiguous.')) {
         Assert-Throws { Assert-MacCanvasPath $path } "reject unsafe path: $path"
@@ -72,6 +79,8 @@ try {
     Set-Fixture 'v0.1.0' 1
     $first = Install-MacCanvas -Version latest -InstallDirectory $managed -NoLaunch -NoShortcut
     Assert-Test ((Get-FileHash -LiteralPath $first.Executable).Hash -ieq $script:hash) 'install matching release bytes'
+    Assert-Test (@((Read-MacCanvasReceipt $managed).PSObject.Properties.Name) -notcontains 'shortcuts') 'pinned older releases retain their compatible receipt schema'
+    Assert-Test (@($shortcutPaths | Where-Object { Test-Path -LiteralPath $_ }).Count -eq 0) 'NoShortcut creates neither Start menu nor Desktop links'
     $again = Install-MacCanvas -Version v0.1.0 -InstallDirectory $managed -NoLaunch -NoShortcut
     Assert-Test ($again.Version -ceq 'v0.1.0') 'repeat install succeeds'
     $oldHash = $script:hash
@@ -91,15 +100,56 @@ try {
     Uninstall-MacCanvas -InstallDirectory $managed
     Assert-Test (-not (Test-Path -LiteralPath $managed)) 'uninstall removes only known managed files'
     Assert-Test (Test-Path -LiteralPath (Join-Path $unrelated 'keep.txt')) 'uninstall preserves unrelated files'
+
+    Set-Fixture 'v0.3.1' 3
+    $disabled = Install-MacCanvas -Version latest -InstallDirectory $managed -NoLaunch -NoShortcut
+    Assert-Test ((Read-MacCanvasReceipt $managed).shortcuts -ceq $false) 'new installs persist shortcut opt-out for in-app updates'
+    Assert-Test (@($shortcutPaths | Where-Object { Test-Path -LiteralPath $_ }).Count -eq 0) 'shortcut opt-out leaves both folders untouched'
+    Assert-Test (-not (Test-Path -LiteralPath $menuDirectory) -and -not (Test-Path -LiteralPath $desktopDirectory)) 'shortcut opt-out does not create missing shell folders'
+    $installed = Install-MacCanvas -Version latest -InstallDirectory $managed -NoLaunch
+    Assert-Test ((Read-MacCanvasReceipt $managed).shortcuts -ceq $true) 'normal installs enable shortcut maintenance'
+    $shell = New-Object -ComObject WScript.Shell
+    foreach ($path in $shortcutPaths) {
+        Assert-Test (Test-Path -LiteralPath $path -PathType Leaf) "create native shortcut: $path"
+        $link = $shell.CreateShortcut($path)
+        Assert-Test ($link.TargetPath -ieq $installed.Executable -and $link.WorkingDirectory -ieq $managed -and
+            $link.IconLocation -ieq "$($installed.Executable),0" -and $link.Arguments -ceq '') 'shortcut has current executable, working directory, icon, and no arguments'
+    }
+    [IO.File]::Delete($shortcutPaths[1])
+    $stale = $shell.CreateShortcut($shortcutPaths[0])
+    $stale.WorkingDirectory = $root
+    $stale.IconLocation = "$PSHOME\powershell.exe,0"
+    $stale.Arguments = '--help'
+    $stale.Save()
+    $null = Install-MacCanvas -Version latest -InstallDirectory $managed -NoLaunch
+    Assert-Test (Test-Path -LiteralPath $shortcutPaths[1] -PathType Leaf) 'installer update restores missing Desktop shortcut'
+    $repaired = $shell.CreateShortcut($shortcutPaths[0])
+    Assert-Test ($repaired.WorkingDirectory -ieq $managed -and $repaired.IconLocation -ieq "$($installed.Executable),0" -and
+        $repaired.Arguments -ceq '') 'installer update refreshes stale shortcut metadata'
+    Uninstall-MacCanvas -InstallDirectory $managed
+    Assert-Test (@($shortcutPaths | Where-Object { Test-Path -LiteralPath $_ }).Count -eq 0) 'uninstall removes both app-owned shortcuts'
+
+    $other = $shell.CreateShortcut($shortcutPaths[1])
+    $other.TargetPath = Join-Path $unrelated 'keep.txt'
+    $other.Save()
+    $otherBytes = [IO.File]::ReadAllBytes($shortcutPaths[1])
+    Assert-Throws { Install-MacCanvas -Version latest -InstallDirectory $managed -NoLaunch } 'refuse a Desktop shortcut belonging to another target'
+    Assert-Test (-not (Test-Path -LiteralPath $shortcutPaths[0])) 'shortcut conflicts are detected before either link is written'
+    Assert-Test ([Convert]::ToBase64String([IO.File]::ReadAllBytes($shortcutPaths[1])) -ceq
+        [Convert]::ToBase64String($otherBytes)) 'conflicting Desktop shortcut is never overwritten'
+    Uninstall-MacCanvas -InstallDirectory $managed
+    Assert-Test (Test-Path -LiteralPath $shortcutPaths[1]) 'uninstall preserves a shortcut pointing elsewhere'
 } finally {
     foreach ($path in @(
         (Join-Path $managed 'MacCanvas.exe'),
         (Join-Path $managed '.maccanvas-install.json'),
-        (Join-Path $unrelated 'keep.txt')
+        (Join-Path $unrelated 'keep.txt'),
+        $shortcutPaths[0],
+        $shortcutPaths[1]
     )) {
         if (Test-Path -LiteralPath $path -PathType Leaf) { [IO.File]::Delete($path) }
     }
-    foreach ($path in @($managed, $unrelated, $root)) {
+    foreach ($path in @($managed, $unrelated, $menuDirectory, $desktopDirectory, $root)) {
         if ((Test-Path -LiteralPath $path -PathType Container) -and @(Get-ChildItem -LiteralPath $path -Force).Count -eq 0) {
             [IO.Directory]::Delete($path, $false)
         }

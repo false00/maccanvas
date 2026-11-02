@@ -147,6 +147,45 @@ param(
         return $receipt
     }
 
+    function Get-MacCanvasShortcutPaths {
+        foreach ($folder in @('Programs', 'DesktopDirectory')) {
+            $directory = [Environment]::GetFolderPath($folder)
+            if ([string]::IsNullOrWhiteSpace($directory)) { throw "Windows could not locate the $folder shortcut folder." }
+            Join-Path $directory 'MacCanvas.lnk'
+        }
+    }
+
+    function Set-MacCanvasShortcuts([string]$Executable) {
+        $paths = @(Get-MacCanvasShortcutPaths)
+        $shell = New-Object -ComObject WScript.Shell
+        foreach ($path in $paths) {
+            if (Test-Path -LiteralPath $path) {
+                if ($shell.CreateShortcut($path).TargetPath -ine $Executable) {
+                    throw "Existing MacCanvas shortcut points elsewhere; it was not overwritten: $path"
+                }
+            }
+        }
+        foreach ($path in $paths) {
+            $null = [IO.Directory]::CreateDirectory((Split-Path -Parent $path))
+            $shortcut = $shell.CreateShortcut($path)
+            $shortcut.TargetPath = $Executable
+            $shortcut.WorkingDirectory = Split-Path -Parent $Executable
+            $shortcut.Arguments = ''
+            $shortcut.IconLocation = "$Executable,0"
+            $shortcut.Description = 'Windows VNC viewer for macOS'
+            $shortcut.Save()
+        }
+    }
+
+    function Remove-MacCanvasShortcuts([string]$Executable) {
+        $shell = New-Object -ComObject WScript.Shell
+        foreach ($path in @(Get-MacCanvasShortcutPaths)) {
+            if (Test-Path -LiteralPath $path) {
+                if ($shell.CreateShortcut($path).TargetPath -ieq $Executable) { [IO.File]::Delete($path) }
+            }
+        }
+    }
+
     function Install-MacCanvas([string]$Version, [string]$InstallDirectory, [switch]$NoLaunch, [switch]$NoShortcut) {
         if (-not [Environment]::Is64BitOperatingSystem -or
             [Environment]::GetEnvironmentVariable('PROCESSOR_ARCHITECTURE', 'Machine') -ine 'AMD64') {
@@ -198,6 +237,8 @@ param(
         try {
             [IO.File]::WriteAllBytes($stage, $bytes)
             $receipt = @{ repository = 'false00/maccanvas'; version = $release.tag_name; sha256 = $expected }
+            # Older viewers reject receipt fields they do not recognize.
+            if ([version]$release.tag_name.Substring(1) -ge [version]'0.3.1') { $receipt.shortcuts = -not $NoShortcut }
             [IO.File]::WriteAllText($stageReceipt, ($receipt | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
             if ($null -ne $oldReceipt) {
                 [IO.File]::Replace($stage, $exe, $backup)
@@ -225,17 +266,7 @@ param(
             }
         }
         if (-not $NoShortcut) {
-            $menu = Join-Path ([Environment]::GetFolderPath('Programs')) 'MacCanvas.lnk'
-            $shell = New-Object -ComObject WScript.Shell
-            if (Test-Path -LiteralPath $menu) {
-                $existing = $shell.CreateShortcut($menu)
-                if ($existing.TargetPath -ine $exe) { throw 'Existing MacCanvas shortcut points elsewhere; it was not overwritten.' }
-            }
-            $shortcut = $shell.CreateShortcut($menu)
-            $shortcut.TargetPath = $exe
-            $shortcut.WorkingDirectory = $directory
-            $shortcut.Description = 'Windows VNC viewer for macOS'
-            $shortcut.Save()
+            Set-MacCanvasShortcuts $exe
         }
         if (-not $NoLaunch) { Start-Process -FilePath $exe -WorkingDirectory $directory }
         return [pscustomobject]@{ Executable = $exe; Version = $release.tag_name }
@@ -245,11 +276,7 @@ param(
         $directory = Assert-MacCanvasPath $InstallDirectory
         $null = Read-MacCanvasReceipt $directory
         $exe = Join-Path $directory 'MacCanvas.exe'
-        $menu = Join-Path ([Environment]::GetFolderPath('Programs')) 'MacCanvas.lnk'
-        if (Test-Path -LiteralPath $menu) {
-            $shell = New-Object -ComObject WScript.Shell
-            if ($shell.CreateShortcut($menu).TargetPath -ieq $exe) { [IO.File]::Delete($menu) }
-        }
+        Remove-MacCanvasShortcuts $exe
         [IO.File]::Delete($exe)
         [IO.File]::Delete((Join-Path $directory '.maccanvas-install.json'))
         if (@(Get-ChildItem -LiteralPath $directory -Force).Count -eq 0) { [IO.Directory]::Delete($directory, $false) }

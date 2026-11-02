@@ -37,7 +37,9 @@ irm https://raw.githubusercontent.com/false00/maccanvas/main/install.ps1 | iex
 ```
 
 Run the same command to update. The installer verifies SHA-256 digests and creates
-a Start-menu shortcut. Prefer portable? Download `MacCanvas-windows-x64.exe`
+Desktop and Start-menu shortcuts. Installed copies repair missing or outdated shortcuts
+on launch, including after an in-app update. Use `-NoShortcut` to skip both.
+Prefer portable? Download `MacCanvas-windows-x64.exe`
 from [Releases](https://github.com/false00/maccanvas/releases/latest) and run it.
 
 When a newer version is available, choose **Update & restart** or **Later**.
@@ -128,7 +130,7 @@ Close MacCanvas, then:
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/false00/maccanvas/main/install.ps1))) -Uninstall
 ```
 
-The managed application and shortcut are removed. Profiles, credentials, and audit logs are
+The managed application and its Desktop and Start-menu shortcuts are removed. Profiles, credentials, and audit logs are
 preserved; delete saved Macs in the app first to remove their logins.
 For a portable copy, delete the executable.
 
