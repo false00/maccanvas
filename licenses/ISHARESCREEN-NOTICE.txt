@@ -1,0 +1,11 @@
+Apple High Performance protocol implementation
+
+Portions of the native Rust Apple High Performance implementation are adapted
+from iShareScreen by iShareScreen contributors:
+https://github.com/renegadelink/iShareScreen
+Source revision: 9ab40d3a3151524f954cff9d6239d891197c1705
+
+Licensed under the GNU Affero General Public License, version 3 or later.
+The complete license is included in MacCanvas's LICENSE.
+Corresponding source, including the port and its build files, is available at:
+https://github.com/false00/maccanvas

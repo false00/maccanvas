@@ -55,7 +55,15 @@ impl From<SftpError> for Error {
     fn from(error: SftpError) -> Self {
         match error {
             SftpError::Status(status) => {
-                Error::Transfer(format!("SFTP request rejected: {}", status.status_code))
+                let message = if status.status_code == StatusCode::PermissionDenied {
+                    "The Mac denied access. Choose a folder this SSH account can access. For protected Desktop, Documents or Downloads folders, check 'Allow full disk access for remote users' in the Mac's Remote Login settings, then reconnect SSH. Also check the account's folder permissions.".into()
+                } else {
+                    format!("SFTP request rejected: {}", status.status_code)
+                };
+                Error::Sftp {
+                    code: status.status_code as u32,
+                    message,
+                }
             }
             error => Error::Transfer(format!("SFTP: {error}")),
         }
@@ -94,6 +102,10 @@ pub enum Event {
     Clipboard(Zeroizing<String>),
     ClipboardSent(u32),
     Failed(String),
+    DirectoryFailed {
+        path: String,
+        error: String,
+    },
     Closed,
 }
 
@@ -522,12 +534,18 @@ async fn run(
         sftp.set_limits(limits.into());
     }
     emit(events, Event::Connected)?;
-    let home = canonical(&sftp, ".").await?;
-    list(&sftp, &home, events, control, &request.audit).await?;
+    let mut initial = Some(Command::List(".".into()));
     loop {
-        let command = tokio::select! {
-            _ = control.stop.cancelled() => break,
-            command = commands.recv() => match command { Some(command) => command, None => break },
+        let command = match initial.take() {
+            Some(command) => command,
+            None => tokio::select! {
+                _ = control.stop.cancelled() => break,
+                command = commands.recv() => match command { Some(command) => command, None => break },
+            },
+        };
+        let browse_path = match &command {
+            Command::List(path) => Some(path.clone()),
+            _ => None,
         };
         let mut attributes = command.attributes()?;
         attributes["operation.id"] = json!(Uuid::new_v4());
@@ -587,7 +605,16 @@ async fn run(
                 },
                 audit::error_attributes(&error),
             );
-            emit(events, Event::Failed(error.to_string()))?;
+            emit(
+                events,
+                match browse_path {
+                    Some(path) => Event::DirectoryFailed {
+                        path,
+                        error: error.to_string(),
+                    },
+                    None => Event::Failed(error.to_string()),
+                },
+            )?;
             recorded?;
         }
     }

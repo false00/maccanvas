@@ -2,3 +2,7 @@
 *.ps1 text eol=crlf
 *.ico binary
 *.png binary
+*.hevc binary
+# Preserve upstream codec formatting and verbatim native license blocks.
+crates/native-hevc/vendor/** -whitespace
+crates/native-hevc/DISTRIBUTION-NOTICES.txt -whitespace

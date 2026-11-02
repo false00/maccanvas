@@ -2,8 +2,6 @@
 
 # MacCanvas
 
-**Your Mac. Your Windows screen.**
-
 A lightweight Windows viewer for macOS Screen Sharing.
 One portable executable. No extra DLLs or subscription.
 
@@ -21,7 +19,8 @@ One portable executable. No extra DLLs or subscription.
 - **Easy connections:** searchable Mac list, quick connect, and an animated, collapsible sidebar.
 - **Protected logins:** Windows Credential Manager storage; **Windows Hello is mandatory for every saved login**. Saved passwords cannot be displayed.
 - **Live statistics:** animated download/upload history, automatic kbps/Mbps units, and an optional FPS counter.
-- **Quality controls:** compression, JPEG quality, maximum update rate, and a manual bandwidth target, with an in-app comparison guide.
+- **HEVC performance modes:** Apple's H.265 stream at up to 30 or 60 FPS, with encrypted control/video and a bundled native decoder.
+- **Quality controls:** lossless VNC and JPEG options, maximum update rate, and a VNC bandwidth target, with an in-app comparison guide.
 - **Familiar controls:** mouse, keyboard, scrolling, full screen, and optional Ctrl-to-Command shortcuts.
 - **Glass-inspired appearance:** black/charcoal in dark mode, Apple-style whites and grays in light mode, and system-blue controls. Follows Windows appearance preferences.
 - **Easy updates:** checks the official release on launch and prompts before a verified, one-click update and restart.
@@ -75,11 +74,21 @@ compression 6, no bandwidth target, and a 60-update/s maximum**.
 Supported methods: **ZRLE, Tight, Tight + JPEG, Hextile, Zlib, RRE, CoRRE, Raw**,
 plus CopyRect. The in-app guide explains CPU cost, image quality, and illustrative
 bandwidth ranges. The Mac can choose a fallback or ignore compression hints.
-Proprietary Apple high-performance codecs and H.264 are not supported.
+For motion, choose **HEVC / H.265 - 30 FPS** or **60 FPS** in **Quality** before
+connecting with **Mac account** login. HEVC needs a compatible Apple-silicon Mac
+running macOS 14 or later and UDP access on the VNC port and the next port
+(normally `5900` and `5901`). It shares the physical desktop without changing
+the Mac's resolution or installing a Mac helper. Native CPU decoding is bundled;
+no Windows codec extension is required.
+
+The HEVC presets request different frame-rate ceilings, not fixed bitrates.
+Actual FPS depends on the Mac, network, and Windows decoding capacity. The VNC
+compression/JPEG and request-bandwidth controls do not apply to HEVC.
+Disconnect before changing transports or HEVC presets. H.264 playback is not supported.
 
 A bandwidth target paces screen requests; **it is not a guaranteed bitrate cap**.
 Bursts can exceed it. Keyboard and mouse input are not throttled.
-Traffic measures VNC and SSH stream bytes, excluding TCP/VPN overhead and update checks. FPS counts unique desktop
+Traffic measures VNC, HEVC/SRTP, and SSH payloads, excluding TCP/UDP/VPN overhead and update checks. FPS counts unique desktop
 images submitted for display, not monitor refreshes; idle screens can read 0 FPS.
 
 ## Clipboard and files
@@ -87,6 +96,7 @@ images submitted for display, not monitor refreshes; idle screens can read 0 FPS
 Open **Clipboard** to enable VNC plain-text sharing. Ctrl+V sends Windows text
 when pasting into the Mac; incoming Mac text can replace your Windows clipboard.
 Standard VNC supports Latin-1; Unicode requires a negotiated UTF-8 extension.
+HEVC sessions use the encrypted SSH clipboard instead of VNC clipboard sharing.
 
 For encrypted Unicode copy/paste and file transfer, open **Files** and enable
 **Remote Login** in the Mac's Sharing settings. Verify the SSH fingerprint before
@@ -145,16 +155,13 @@ cargo build --release --locked
 ```
 
 The pinned toolchain builds `target\x86_64-pc-windows-msvc\release\maccanvas.exe`.
-Rust + Slint, software rendering, static Microsoft C runtime.
+Rust + Slint, software rendering, a bundled libde265 decoder, and static Microsoft C runtime.
 Windows releases are built and tested in GitHub Actions.
 
-Maintained by [@false00](https://github.com/false00).
-**About** shows the version, UTC build date, source revision, target, and compiler.
+Protocol references and prior art: [TigerVNC](https://tigervnc.org/),
+RealVNC, TightVNC, the original VNC authors, and
+[iShareScreen](https://github.com/renegadelink/iShareScreen) for Apple's
+High Performance protocol implementation.
 
-An independent project inspired by [TigerVNC](https://tigervnc.org/).
-Credit to the TigerVNC team, RealVNC, TightVNC, and the original VNC authors.
-No TigerVNC C++ code is embedded. The original logo depicts a remote screen
-becoming a local canvas.
-
-**GPL-3.0-or-later.** Dependency credits: [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt)
+**AGPL-3.0-or-later.** Dependency credits: [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt)
 or `--licenses`.

@@ -23,6 +23,8 @@ use crate::{
 use serde_json::json;
 use zeroize::Zeroizing;
 
+mod hevc;
+
 pub type Frames = Arc<Mutex<Option<Arc<Framebuffer>>>>;
 
 pub enum Event {
@@ -90,6 +92,7 @@ pub struct Session {
     pub counters: Arc<Counters>,
     audit: Scope,
     worker: Option<thread::JoinHandle<()>>,
+    encoding: crate::streaming::Encoding,
 }
 
 enum WriterCommand {
@@ -105,6 +108,15 @@ enum WriterCommand {
 
 impl Session {
     pub fn start(request: Request, events: Sender<(u64, Event)>, frames: Frames) -> Result<Self> {
+        request.streaming.validate()?;
+        let encoding = request.streaming.encoding;
+        if encoding.is_hevc()
+            && request.profile.authentication != crate::profiles::AuthMode::MacLogin
+        {
+            return Err(Error::Configuration(
+                "HEVC requires Mac account login, not a classic VNC password".into(),
+            ));
+        }
         request.audit.critical("session.connection.requested", Level::Info, json!({
             "server.address": request.profile.host, "server.port": request.profile.port,
             "network.transport": "tcp", "network.protocol.name": "rfb",
@@ -113,10 +125,12 @@ impl Session {
             "rfb.streaming": request.streaming,
         }))?;
         let audit = request.audit.clone();
-        let control = Arc::new(Control::new(request.clipboard));
+        let control = Arc::new(Control::new(request.clipboard && !encoding.is_hevc()));
         let (sender, receiver) = mpsc::sync_channel(256);
         sender
-            .try_send(WriterCommand::ClipboardEnabled(request.clipboard))
+            .try_send(WriterCommand::ClipboardEnabled(
+                request.clipboard && !encoding.is_hevc(),
+            ))
             .map_err(|_| Error::Protocol("Cannot initialize the clipboard writer".into()))?;
         let counters = Counters::new();
         let traffic = counters.clone();
@@ -175,11 +189,25 @@ impl Session {
             counters,
             audit,
             worker: Some(worker),
+            encoding,
         })
     }
 
     pub fn send(&self, command: Command) -> Result<()> {
+        if let Command::Configure(settings) = command
+            && (self.encoding.is_hevc() != settings.encoding.is_hevc()
+                || (self.encoding.is_hevc() && self.encoding != settings.encoding))
+        {
+            return Err(Error::Configuration(
+                "Disconnect before changing between VNC and HEVC transports or HEVC FPS presets"
+                    .into(),
+            ));
+        }
         self.post(WriterCommand::Input(command))
+    }
+
+    pub fn uses_hevc(&self) -> bool {
+        self.encoding.is_hevc()
     }
 
     fn post(&self, command: WriterCommand) -> Result<()> {
@@ -207,6 +235,11 @@ impl Session {
     }
 
     pub fn share_clipboard(&self, enabled: bool) -> Result<()> {
+        if enabled && self.uses_hevc() {
+            return Err(Error::Clipboard(
+                "Use the encrypted SSH clipboard in Files while using HEVC".into(),
+            ));
+        }
         self.audit.critical(
             "clipboard.sharing.changed",
             Level::Info,
@@ -286,6 +319,9 @@ fn run(
     control: &Arc<Control>,
     counters: Arc<Counters>,
 ) -> Result<()> {
+    if request.streaming.encoding.is_hevc() {
+        return hevc::run(request, incoming, events, frames, control, counters);
+    }
     let generation = request.generation;
     let credentials = credentials::resolve(
         request.profile.id,

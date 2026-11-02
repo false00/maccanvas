@@ -11,6 +11,7 @@ export component FilesOverlay inherits Rectangle {
     in property <bool> has-saved;
     in-out property <bool> use-saved;
     in property <bool> connected;
+    in property <bool> directory-ready;
     in property <bool> connecting;
     in property <bool> busy;
     in property <bool> key-pending;
@@ -58,7 +59,7 @@ export component FilesOverlay inherits Rectangle {
                 ScrollView {
                 VerticalLayout {
                 spacing: 12px;
-                if root.error != "" : Text { text: root.error; color: GlassTheme.dark ? #ff6961 : #c62820; wrap: word-wrap; font-size: 12px; }
+                if root.error != "" : Text { text: root.error; accessible-label: "SSH operation error: " + root.error; color: GlassTheme.dark ? #ff6961 : #c62820; wrap: word-wrap; font-size: 12px; }
                 if root.key-pending : GlassPanel {
                     radius: 16px;
                     VerticalLayout {
@@ -101,7 +102,7 @@ export component FilesOverlay inherits Rectangle {
                 if root.connected && !root.key-pending : VerticalLayout {
                     spacing: 10px;
                     HorizontalLayout {
-                        Button { text: "Up"; enabled: !root.busy; clicked => { root.up(); } }
+                        Button { text: "Up"; enabled: !root.busy && root.directory-ready; clicked => { root.up(); } }
                         LineEdit { text <=> root.path; enabled: !root.busy; accessible-label: "Mac folder"; accepted => { root.browse(); } }
                         Button { text: "Go"; enabled: !root.busy; clicked => { root.browse(); } }
                         Button { text: "Disconnect SSH"; enabled: !root.busy; clicked => { root.disconnect(); } }
@@ -110,24 +111,28 @@ export component FilesOverlay inherits Rectangle {
                         preferred-height: 220px; min-height: 100px; max-height: 220px; vertical-stretch: 0;
                         VerticalLayout {
                             spacing: 6px; padding-right: 8px;
-                            if root.entries.length == 0 : Text { text: "This folder is empty."; color: GlassTheme.muted; font-size: 13px; }
+                            if root.entries.length == 0 : Text { text: root.directory-ready ? "This folder is empty." : "Enter a Mac folder path to browse."; color: GlassTheme.muted; font-size: 13px; }
                             for file[index] in root.entries : GlassPanel {
-                                radius: 12px; height: 54px;
+                                radius: 12px; height: 58px;
+                                accessible-role: groupbox; accessible-label: (file.directory ? "Mac folder " : "Mac item ") + file.name;
                                 HorizontalLayout {
                                     padding: 9px; spacing: 10px;
                                     VerticalLayout {
-                                        spacing: 1px;
+                                        spacing: 1px; alignment: center; horizontal-stretch: 1;
                                         Text { text: file.name; color: GlassTheme.ink; font-size: 13px; overflow: elide; }
                                         Text { text: file.detail; color: GlassTheme.muted; font-size: 11px; }
                                     }
-                                    Button { text: file.directory ? "Open" : (file.regular ? "Receive" : "Not a file"); accessible-label: (file.directory ? "Open " : "Receive ") + file.name; enabled: !root.busy && (file.directory || file.regular); clicked => { root.entry(index); } }
+                                    VerticalLayout {
+                                        alignment: center; horizontal-stretch: 0;
+                                        Button { preferred-width: 100px; vertical-stretch: 0; text: file.directory ? "Open" : (file.regular ? "Receive" : "Not a file"); accessible-label: (file.directory ? "Open " : "Receive ") + file.name; enabled: !root.busy && (file.directory || file.regular); clicked => { root.entry(index); } }
+                                    }
                                 }
                             }
                         }
                     }
                     HorizontalLayout {
-                        LineEdit { text <=> root.upload-name; placeholder-text: "Optional new file name on the Mac"; enabled: !root.busy; accessible-label: "Upload file name"; }
-                        Button { text: "Send a file..."; primary: true; enabled: !root.busy; clicked => { root.upload(); } }
+                        LineEdit { text <=> root.upload-name; placeholder-text: "Optional new file name on the Mac"; enabled: !root.busy && root.directory-ready; accessible-label: "Upload file name"; }
+                        Button { text: "Send a file..."; primary: true; enabled: !root.busy && root.directory-ready; clicked => { root.upload(); } }
                     }
                     Text { text: "Single files only. Existing files are never replaced. Uploads are verified by reading them back before the final file is created."; color: GlassTheme.muted; wrap: word-wrap; font-size: 11px; }
                     HorizontalLayout {

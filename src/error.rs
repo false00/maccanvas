@@ -24,6 +24,8 @@ pub enum Error {
     Clipboard(String),
     #[error("File transfer: {0}")]
     Transfer(String),
+    #[error("File transfer: {message}")]
+    Sftp { code: u32, message: String },
     #[error("Operation cancelled")]
     Cancelled,
 }

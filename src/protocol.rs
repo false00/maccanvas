@@ -116,6 +116,11 @@ pub fn handshake_with_settings(
     settings: StreamSettings,
 ) -> Result<ServerInfo> {
     settings.validate()?;
+    if settings.encoding.is_hevc() {
+        return Err(Error::Configuration(
+            "HEVC requires the native Apple High Performance transport".into(),
+        ));
+    }
     credentials.validate(mode)?;
     let mut version = [0; 12];
     stream.read_exact(&mut version)?;

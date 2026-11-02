@@ -45,6 +45,12 @@ impl Files {
         app.set_files_key_pending(false);
         app.set_files_password("".into());
         app.set_files_username("".into());
+        self.directory.clear();
+        self.entries.clear();
+        self.last_outcome = None;
+        app.set_files_path(".".into());
+        app.set_files_directory_ready(false);
+        rows(app, self);
     }
 
     pub fn finish(&mut self, app: &App) -> Result<()> {
@@ -329,6 +335,11 @@ pub(super) fn wire(app: &App, state: Rc<RefCell<State>>) {
         let result = (|| {
             let (directory, audit) = {
                 let state = uploading.borrow();
+                if state.files.directory.is_empty() {
+                    return Err(Error::Transfer(
+                        "Open an accessible Mac folder before sending a file".into(),
+                    ));
+                }
                 (state.files.directory.clone(), scope(&state.files)?.clone())
             };
             let local = files::dialog::pick(window_handle(&app)?)?;
@@ -448,6 +459,11 @@ pub(super) fn tick(app: &App, state: &mut State) -> Result<()> {
                 app.set_files_open(true);
             }
             Event::Connected => {
+                state.files.directory.clear();
+                state.files.entries.clear();
+                rows(app, &state.files);
+                app.set_files_path(".".into());
+                app.set_files_directory_ready(false);
                 app.set_files_connected(true);
                 app.set_files_connecting(false);
                 app.set_files_busy(true);
@@ -458,6 +474,8 @@ pub(super) fn tick(app: &App, state: &mut State) -> Result<()> {
                 state.files.entries = entries;
                 app.set_files_path(path.into());
                 rows(app, &state.files);
+                app.set_files_directory_ready(true);
+                app.set_files_error("".into());
                 app.set_files_busy(false);
                 app.set_files_status(
                     state
@@ -507,6 +525,32 @@ pub(super) fn tick(app: &App, state: &mut State) -> Result<()> {
             Event::Failed(error) => {
                 app.set_files_busy(false);
                 fail(app, error);
+            }
+            Event::DirectoryFailed { path, error } => {
+                app.set_files_busy(false);
+                state.files.last_outcome = None;
+                let ready = !state.files.directory.is_empty();
+                app.set_files_directory_ready(ready);
+                app.set_files_path(
+                    if ready {
+                        state.files.directory.clone()
+                    } else {
+                        path.clone()
+                    }
+                    .into(),
+                );
+                app.set_files_status(
+                    if ready {
+                        format!("SSH connected. Showing {}.", state.files.directory)
+                    } else {
+                        "SSH connected. Enter a folder this account can access.".into()
+                    }
+                    .into(),
+                );
+                fail(
+                    app,
+                    format!("Cannot open the Mac folder \"{path}\". {error}"),
+                );
             }
             Event::Closed => {
                 state.files.stop(app);

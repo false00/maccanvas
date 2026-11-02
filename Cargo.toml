@@ -1,9 +1,9 @@
 [package]
 name = "maccanvas"
-version = "0.3.3"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.92"
-license = "GPL-3.0-or-later"
+license = "AGPL-3.0-or-later"
 description = "A lightweight Windows VNC viewer built for macOS Screen Sharing"
 repository = "https://github.com/false00/maccanvas"
 build = "build.rs"
@@ -12,13 +12,19 @@ build = "build.rs"
 aes = { version = "0.8", features = ["zeroize"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 crypto-bigint = { version = "0.7", features = ["alloc", "zeroize"] }
+ctr = "0.9"
 des = { version = "0.8", features = ["zeroize"] }
 dirs = "6"
 fast_image_resize = "5"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 getrandom = "0.3"
+hmac = "0.12"
 md-5 = "0.10"
+native-hevc = { path = 'crates\native-hevc' }
 raw-window-handle = "0.6"
+plist = "1.8"
+rand = "0.8"
+rsa = "0.9"
 russh = { version = "0.65", default-features = false, features = ["ring"] }
 russh-sftp = "3.0"
 serde = { version = "1", features = ["derive"] }
@@ -26,6 +32,9 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 semver = "1"
 self-replace = "1.5"
 sha2 = "0.10"
+sha1 = "0.10"
+socket2 = "0.6"
+subtle = "2"
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "net", "time", "io-util", "sync", "macros"] }
 tokio-util = { version = "0.7", default-features = false, features = ["rt"] }

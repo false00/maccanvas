@@ -99,6 +99,8 @@ export component App inherits Window {
     in property <bool> files-has-saved;
     in-out property <bool> files-use-saved;
     in property <bool> files-connected;
+    in property <bool> hevc-active;
+    in property <bool> files-directory-ready;
     in property <bool> files-connecting;
     in property <bool> files-busy;
     in property <bool> files-key-pending;
@@ -526,35 +528,35 @@ export component App inherits Window {
                     if !root.help-open : VerticalLayout {
                         spacing: 12px; padding-right: 8px;
                         Text { text: "Default: Auto (lossless), compression 6, no bandwidth target, 60 FPS maximum."; color: root.muted; font-size: 12px; wrap: word-wrap; }
-                        Caption { text: "Compression method"; }
+                        Caption { text: "Streaming mode"; }
                         ComboBox {
                             accessible-label: "Compression method";
-                            model: ["Auto (recommended, lossless)", "ZRLE (lossless)", "Tight (lossless)", "Tight + JPEG (lossy)", "Hextile (lossless)", "Zlib (lossless)", "RRE (legacy)", "CoRRE (legacy)", "Raw (uncompressed)"];
+                            model: ["Auto (recommended, lossless)", "ZRLE (lossless)", "Tight (lossless)", "Tight + JPEG (lossy)", "Hextile (lossless)", "Zlib (lossless)", "RRE (legacy)", "CoRRE (legacy)", "Raw (uncompressed)", "HEVC / H.265 - 30 FPS", "HEVC / H.265 - 60 FPS"];
                             current-index <=> root.encoding-index;
                         }
                         Text { text: root.encoding-description; color: root.muted; font-size: 12px; wrap: word-wrap; }
                         Button { text: "Compare methods & bandwidth estimates"; clicked => { root.help-open = true; } }
-                        HorizontalLayout {
+                        if root.encoding-index < 9 : HorizontalLayout {
                             Caption { text: "Compression effort: " + round(root.compression-level); }
                             Slider { accessible-label: "Compression effort"; minimum: 0; maximum: 9; step: 1; value <=> root.compression-level; enabled: root.encoding-index <= 3 || root.encoding-index == 5; }
                         }
-                        Text { text: "0 = less CPU, potentially more traffic. 9 = more CPU, potentially fewer bytes. This is a server hint, not a bitrate."; color: root.muted; font-size: 11px; wrap: word-wrap; }
+                        if root.encoding-index < 9 : Text { text: "0 = less CPU, potentially more traffic. 9 = more CPU, potentially fewer bytes. This is a server hint, not a bitrate."; color: root.muted; font-size: 11px; wrap: word-wrap; }
                         if root.encoding-index == 3 : HorizontalLayout {
                             Caption { text: "JPEG quality: " + round(root.jpeg-quality); }
                             Slider { accessible-label: "JPEG quality"; minimum: 0; maximum: 9; step: 1; value <=> root.jpeg-quality; }
                         }
-                        CheckBox { text: "Use a manual bandwidth target"; checked <=> root.manual-bandwidth; }
-                        if root.manual-bandwidth : HorizontalLayout {
+                        if root.encoding-index < 9 : CheckBox { text: "Use a manual bandwidth target"; checked <=> root.manual-bandwidth; }
+                        if root.manual-bandwidth && root.encoding-index < 9 : HorizontalLayout {
                             Caption { text: "Target (Mbps)"; }
                             LineEdit { accessible-label: "Bandwidth target Mbps"; text <=> root.target-mbps; input-type: InputType.decimal; }
                         }
-                        Text { text: "Automatic means no bandwidth target. A manual target spaces out screen requests based on received bytes. Bursts can exceed it; it cannot force a Mac to use a fixed bitrate. Mouse and keyboard stay responsive."; color: root.muted; font-size: 12px; wrap: word-wrap; }
+                        Text { text: root.encoding-index >= 9 ? "HEVC negotiates adaptive video over encrypted UDP. Rectangle compression, JPEG quality and the VNC request-bandwidth target do not apply. This field can reduce the local display rate below the selected 30/60 FPS preset. Reconnect to change transports or HEVC presets." : "Automatic means no bandwidth target. A manual target spaces out screen requests based on received bytes. Bursts can exceed it; it cannot force a Mac to use a fixed bitrate. Mouse and keyboard stay responsive."; color: root.muted; font-size: 12px; wrap: word-wrap; }
                         HorizontalLayout {
                             Caption { text: "Maximum updates / second"; }
                             LineEdit { accessible-label: "Maximum FPS"; width: 88px; text <=> root.max-fps; input-type: InputType.number; }
                         }
                         CheckBox { text: "Show live FPS counter"; checked <=> root.show-fps; toggled => { root.save-preferences(); } }
-                        Text { text: "FPS counts unique desktop images submitted for display, not monitor refreshes. An idle desktop correctly reads 0 FPS. Traffic shows measured RFB payload in bits/s, not estimated TCP/VPN overhead."; color: root.muted; font-size: 11px; wrap: word-wrap; }
+                        Text { text: "FPS counts unique desktop images submitted for display, not monitor refreshes. An idle desktop correctly reads 0 FPS. Traffic measures VNC, HEVC/SRTP and SSH payloads in bits/s, excluding TCP/UDP/VPN overhead."; color: root.muted; font-size: 11px; wrap: word-wrap; }
                     }
                     if root.help-open : VerticalLayout {
                         spacing: 16px; padding-right: 8px;
@@ -567,7 +569,7 @@ export component App inherits Window {
                             Rectangle { height: 1px; background: root.outline; }
                         }
                         Text {
-                            text: "CopyRect is always offered to move existing pixels efficiently. Raw remains a compatibility fallback. The Mac can choose another offered method or ignore compression/JPEG hints. Proprietary Apple high-performance codecs and H.264 are not supported here.";
+                            text: "Standard VNC offers CopyRect and a Raw fallback; the Mac may ignore compression/JPEG hints. HEVC uses Apple's separate High Performance transport with encrypted control, SRTP video and a bundled native decoder. It requires Mac account login and UDP on the VNC port and the next port. H.264 playback is not supported.";
                             color: root.muted; font-size: 12px; wrap: word-wrap;
                         }
                     }
@@ -589,7 +591,7 @@ export component App inherits Window {
     }
 
     if root.clipboard-open : ClipboardOverlay {
-        shared <=> root.clipboard-shared; mode: root.clipboard-mode;
+        shared <=> root.clipboard-shared; mode: root.clipboard-mode; vnc-available: !root.hevc-active;
         changed => { root.clipboard-changed(); }
         close => { root.clipboard-open = false; if root.connected { root.focus-canvas(); } }
         paste-text => { root.paste-windows-text(); }
@@ -600,6 +602,7 @@ export component App inherits Window {
         host: root.files-host; port <=> root.files-port; username <=> root.files-username; password <=> root.files-password;
         has-saved: root.files-has-saved; use-saved <=> root.files-use-saved; connected: root.files-connected;
         connecting: root.files-connecting; busy: root.files-busy; key-pending: root.files-key-pending;
+        directory-ready: root.files-directory-ready;
         fingerprint: root.files-fingerprint; key-algorithm: root.files-key-algorithm; key-command: root.files-key-command;
         path <=> root.files-path; upload-name <=> root.files-upload-name; entries: root.file-entries;
         status: root.files-status; error: root.files-error; progress: root.files-progress; progress-label: root.files-progress-label;

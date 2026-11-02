@@ -1,0 +1,118 @@
+native-hevc 0.1.0
+=================
+
+The MacCanvas Rust wrapper, native bridge, build script, and original synthetic
+test samples are licensed under AGPL-3.0-or-later; see COPYING.
+
+Parent dependency (Windows TOML literal path):
+native-hevc = { path = 'crates\native-hevc' }
+
+Build and runtime
+-----------------
+Requires Rust 1.96.1 x86_64-pc-windows-msvc, MSVC C++17 build tools (verified with
+Visual Studio 2022), and the Windows SDK. Cargo's cc build helper discovers MSVC.
+The only Cargo dependencies are build-time helpers; the Rust API uses std only.
+Build with RUSTFLAGS="-C target-feature=+crt-static"; build.rs rejects a dynamic
+Rust CRT and explicitly compiles the bundled C/C++ with the static MSVC CRT.
+No CMake, vcpkg, NASM, Python, FFmpeg, system-installed codec, or decoder DLL is
+needed to build or run. The decoder is CPU-only, with runtime-dispatched SSE4.1
+and scalar fallback; no GPU acceleration is claimed.
+Full-range 8-bit 4:4:4 RGBA conversion uses x64's mandatory SSE2 with Q14
+coefficients (at most one RGB level of rounding difference). Scalar row tails,
+limited-range 4:4:4, and 4:2:0 retain the scalar BT.709 conversion. All image/input
+limits and native error handling are unchanged. No native worker threads are
+started: streams without WPP or tiles cannot parallelize slice decoding.
+
+The following PowerShell commands validate this crate independently:
+$env:CARGO_TARGET_DIR = 'C:\Users\juanc\Ortega\maccanvas\target\native-hevc-check'
+$env:RUSTFLAGS = '-C target-feature=+crt-static'
+cargo test --manifest-path .\crates\native-hevc\Cargo.toml
+cargo build --manifest-path .\crates\native-hevc\Cargo.toml --release --example decode_sample
+Manual stage profiling (11 warmed 4K samples; native and conversion timed separately):
+cargo test --manifest-path .\crates\native-hevc\Cargo.toml --release --lib profile_4k_stages -- --ignored --nocapture
+
+The decoder requires complete Annex-B access units, not arbitrary fragments.
+Push access units in decoding order; the supplied signed i64 PTS is attached to
+each picture and retained through display-order output. Call flush once at EOS.
+Create a new decoder after a fatal error or to begin a different stream.
+Input preflight rejects malformed headers, unsupported formats, oversized coded
+dimensions (including dimensions hidden by cropping), and oversized input before
+passing it to native code. Native buffer allocation independently enforces the
+image bounds. Nonfatal preflight rejection does not mutate decoder state.
+Native errors and warnings fail explicitly and poison the decoder.
+
+API: native_hevc::{Decoder, DecodedFrame, Error, Result}
+Decoder::new() -> Result<Decoder>
+Decoder::push(&mut self, annex_b: &[u8], pts: i64) -> Result<Vec<DecodedFrame>>
+Decoder::flush(&mut self) -> Result<Vec<DecodedFrame>>
+DecodedFrame: pts: i64, width: u32, height: u32, rgba: Vec<u8>
+Output: tightly packed full-range BT.709 RGBA8, alpha 255, 8-bit 4:4:4/4:2:0
+input, nearest-neighbor chroma upsampling. Limited-range VUI input is expanded.
+See public Rust documentation for all resource limits and terminal states.
+
+Bundled libde265
+---------------
+Version: 1.1.3, tag v1.1.3
+Upstream: https://github.com/strukturag/libde265
+Commit: ba62bf4cfb3242f3bf0a45617ff09e35236e4d82
+Original archive:
+https://codeload.github.com/strukturag/libde265/tar.gz/refs/tags/v1.1.3
+Original archive SHA-256:
+189baa08fd6d2dd34db099de411bd6b2e6bd5eb88e81236a3d0fa3826b9715c4
+License: LGPL-3.0-or-later, copyright notices retained in each source file.
+Principal authors: struktur AG, Dirk Farin, Joachim Bauch; see
+vendor\libde265\AUTHORS, vendor\libde265\COPYING, and
+vendor\libde265\libde265\COPYING. The upstream COPYING also supplies GPLv3.
+
+The bundled directory contains decoder sources, x86 SSE kernels, and Win32
+condition-variable support. Encoder, player, framework, and external-library
+integrations are not built. Local modifications dated 2026-11-02:
+* libde265\decctx.cc propagates decode_some() failures instead of discarding them.
+* libde265\decctx.cc finalizes an access unit without prematurely flushing the
+  picture reorder buffer; only end-of-stream forces all delayed pictures out.
+* libde265\de265.cc balances global library initialization if construction throws.
+* The cc-based static build and generated configuration/version headers replace
+  upstream CMake; native\bridge.cc bounds native image allocations and translates
+  C++ exceptions into explicit error codes.
+
+The libde265-rs 0.2.1 wrapper is NOT a dependency. Its libde265-sys2 0.1.0 Windows
+build script always uses vcpkg, even when embedded-libde265 is enabled; directly
+bundling the same upstream decoder avoids that Windows-only build limitation.
+
+Other retained upstream notices
+-------------------------------
+extra\win32cond.c/.h: DOC software, copyright 1993-2009 Douglas C. Schmidt and
+his research group at Washington University, University of California Irvine,
+and Vanderbilt University. Its permissive copyright/permission notice is
+retained in both source files; preserve that notice in source distributions.
+libde265\md5.cc/.h: public-domain implementation by Alexander Peslyak (2001),
+with a permissive fallback license and no warranty, retained in both files.
+
+Distribution responsibilities
+-----------------------------
+The parent application must include the appropriate AGPLv3, LGPLv3/GPLv3 and
+third-party notices and distribute the complete corresponding buildable source
+for this statically linked combination, including local native changes and build
+scripts, with the required ability to modify/rebuild/relink and any installation
+information required by the licenses. Do not remove upstream source notices.
+The cc/find-msvc-tools/shlex/jobserver helpers are MIT OR Apache-2.0 build-time
+dependencies, not decoder runtime imports. Their licenses apply if redistributing
+those helpers or a vendored Cargo build-dependency source tree.
+
+Synthetic fixtures
+------------------
+tests\data\*.hevc encode only original arithmetic YCbCr color patterns.
+tests\generate-fixtures.ps1 regenerates them using an optional FFmpeg/libx265
+installation. FFmpeg/libx265 are generation tools, never runtime dependencies.
+pattern444.hevc: RExt 4:4:4, 8-bit, lossless, full-range BT.709, 64x48.
+pattern420.hevc: Main 4:2:0, 8-bit, lossless, full-range BT.709, seven 64x48 frames
+including B pictures. Display indices in decode order: 0,3,2,1,6,5,4.
+cropped420.hevc: Main 4:2:0, 8-bit, lossless, limited-range BT.709, 62x46 with
+a coded conformance window. Tests compare every RGBA pixel to an independent
+floating-point BT.709 reference with at most one unit of RGB rounding error.
+quadrants444_4k.hevc: RExt 4:4:4, 8-bit, lossless, full-range BT.709, one
+3840x2160 intra picture (keyint=1, bframes=0), with red/green/blue/white quadrants.
+Expected rounded quadrant RGBA values: (254,0,0,255), (0,255,0,255),
+(0,0,254,255), (255,255,255,255), respectively. The 4K test samples all quadrants,
+corners, and seam-adjacent pixels, allows one unit of RGB rounding error, and
+requires push to emit the frame without EOF flushing.

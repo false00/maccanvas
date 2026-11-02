@@ -44,7 +44,7 @@ jobs:
         run: |
           cargo fmt --all -- --check
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --all-targets --locked
+          cargo test --all-targets --locked --package maccanvas --package native-hevc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --test windows_clipboard --locked -- --ignored --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

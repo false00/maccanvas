@@ -5,5 +5,8 @@ $root = Split-Path -Parent $PSScriptRoot
 if ($LASTEXITCODE -ne 0) { throw 'Dependency license generation failed.' }
 $path = Join-Path $root 'THIRD_PARTY_NOTICES.txt'
 $text = [IO.File]::ReadAllText($path).Replace("`r`n", "`n")
+$text += "`n" + [IO.File]::ReadAllText((Join-Path $root 'licenses\ISHARESCREEN-NOTICE.txt'))
+$text += "`n" + [IO.File]::ReadAllText((Join-Path $root 'crates\native-hevc\DISTRIBUTION-NOTICES.txt'))
+$text = $text.Replace("`r`n", "`n")
 $text = [regex]::Replace($text, '[ \t]+(?=\n)', '').TrimEnd() + "`n"
 [IO.File]::WriteAllText($path, $text, [Text.UTF8Encoding]::new($false))

@@ -366,6 +366,8 @@ fn disconnect(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
         release.and(close)
     };
     app.set_connected(false);
+    app.set_hevc_active(false);
+    app.set_clipboard_shared(state.borrow().settings.clipboard_enabled);
     app.set_connecting(false);
     app.set_clipboard_open(false);
     app.set_files_open(false);
@@ -382,6 +384,11 @@ fn disconnect(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
 }
 
 fn paste_windows(app: &App, state: &mut State) -> Result<()> {
+    if state.session.as_ref().is_some_and(Session::uses_hevc) {
+        return Err(Error::Clipboard(
+            "Use the encrypted SSH clipboard in Files while using HEVC".into(),
+        ));
+    }
     let owner = window_handle(app)?;
     if let Some((sequence, text)) = state.clipboard.paste(owner)? {
         let session = state
@@ -398,6 +405,10 @@ fn tick_clipboard(app: &App, state: &mut State) -> Result<()> {
     let Some(session) = &state.session else {
         return Ok(());
     };
+    if session.uses_hevc() {
+        app.set_clipboard_mode("HEVC uses the encrypted SSH clipboard in Files.".into());
+        return Ok(());
+    }
     app.set_clipboard_mode(
         if session.clipboard_utf8() {
             "UTF-8 negotiated: Unicode plain text is available."
@@ -464,7 +475,8 @@ fn read_stream_form(app: &App) -> Result<StreamSettings> {
             "Compression and JPEG quality must be between 0 and 9".into(),
         ));
     }
-    let target_kbps = if app.get_manual_bandwidth() {
+    let encoding = Encoding::from_index(app.get_encoding_index())?;
+    let target_kbps = if app.get_manual_bandwidth() && !encoding.is_hevc() {
         let value = app.get_target_mbps().parse::<f64>().map_err(|_| {
             Error::Configuration("Enter a bandwidth target in Mbps, for example 10 or 0.5".into())
         })?;
@@ -478,7 +490,7 @@ fn read_stream_form(app: &App) -> Result<StreamSettings> {
         0
     };
     let settings = StreamSettings {
-        encoding: Encoding::from_index(app.get_encoding_index())?,
+        encoding,
         compression: app.get_compression_level().round() as u8,
         jpeg_quality: app.get_jpeg_quality().round() as u8,
         target_kbps,
@@ -492,7 +504,9 @@ fn read_stream_form(app: &App) -> Result<StreamSettings> {
 }
 
 fn stream_summary(app: &App, settings: StreamSettings) {
-    let target = if settings.target_kbps == 0 {
+    let target = if settings.encoding.is_hevc() {
+        "Adaptive video bitrate".into()
+    } else if settings.target_kbps == 0 {
         "Automatic (no target)".into()
     } else {
         format!(
@@ -505,7 +519,7 @@ fn stream_summary(app: &App, settings: StreamSettings) {
             "{}  |  {}  |  Up to {} updates/s",
             settings.encoding.label(),
             target,
-            settings.max_fps
+            settings.max_fps.min(settings.encoding.fps_ceiling())
         )
         .into(),
     );
@@ -521,6 +535,13 @@ fn guide(app: &App, size: Option<Extent>) {
     let rows = Encoding::ALL
         .into_iter()
         .map(|encoding| {
+            if encoding.is_hevc() {
+                return CodecGuide {
+                    name: encoding.label().into(),
+                    detail: encoding.description().into(),
+                    estimate: "Adaptive HEVC video: use the live traffic meter. 60 FPS generally costs more bandwidth and CPU than 30 FPS; VNC rectangle-compression ratios do not apply.".into(),
+                };
+            }
             let (low, high) = match encoding {
                 Encoding::Auto | Encoding::Zrle => (2.0, 12.0),
                 Encoding::Tight => (3.0, 20.0),
@@ -529,6 +550,7 @@ fn guide(app: &App, size: Option<Extent>) {
                 Encoding::Zlib => (2.0, 6.0),
                 Encoding::Rre | Encoding::Corre => (0.5, 4.0),
                 Encoding::Raw => (1.0, 1.0),
+                Encoding::Hevc30 | Encoding::Hevc60 => unreachable!("handled HEVC guide"),
             };
             CodecGuide {
                 name: encoding.label().into(),
@@ -1302,7 +1324,7 @@ pub fn run(
             let mut state = key_state.borrow_mut();
             state.flush_pointer()?;
             if down
-                && state.settings.clipboard_enabled
+                && app.get_clipboard_shared()
                 && (event.modifiers.meta || (event.modifiers.control && app.get_ctrl_as_command()))
                 && !event.modifiers.alt
                 && matches!(event.text.as_str(), "v" | "V" | "\u{16}")
@@ -1397,6 +1419,9 @@ pub fn run(
                         };
                         app.set_connecting(false);
                         app.set_connected(true);
+                        let hevc = timer_state.borrow().session.as_ref().is_some_and(Session::uses_hevc);
+                        app.set_hevc_active(hevc);
+                        app.set_clipboard_shared(!hevc && timer_state.borrow().settings.clipboard_enabled);
                         app.set_status(
                             format!("Connected to {} ({server_name})", profile.name).into(),
                         );

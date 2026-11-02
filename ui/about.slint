@@ -57,7 +57,7 @@ export component AboutOverlay inherits Rectangle {
                     HorizontalLayout {
                         Button { text: "Source code"; clicked => { root.open-link(1); } }
                         Button { text: "Releases"; clicked => { root.open-link(2); } }
-                        Button { text: "GPL-3.0 license"; clicked => { root.open-link(4); } }
+                        Button { text: "AGPL-3.0 license"; clicked => { root.open-link(4); } }
                     }
                     Text { text: "Independent Rust + Slint viewer. Thanks to the TigerVNC, RealVNC, TightVNC, and original VNC authors for their work on remote desktop protocols."; color: GlassTheme.muted; wrap: word-wrap; font-size: 12px; }
                     Text { text: "LOCAL SECURITY AUDIT"; color: GlassTheme.muted; font-size: 11px; font-weight: 600; }

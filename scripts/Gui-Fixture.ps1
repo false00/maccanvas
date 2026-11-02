@@ -128,6 +128,33 @@ public static class MacCanvasOwnedDialogInput {
         (Find-FixtureElement 'Trust key & continue' ([Windows.Automation.ControlType]::Button)).
             GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
         $null = Find-FixtureElement 'Receive source.txt' ([Windows.Automation.ControlType]::Button)
+        $folder = Find-FixtureElement 'Mac folder Desktop' ([Windows.Automation.ControlType]::Group)
+        $open = Find-FixtureElement 'Open Desktop' ([Windows.Automation.ControlType]::Button)
+        $rowBounds = $folder.Current.BoundingRectangle
+        $buttonBounds = $open.Current.BoundingRectangle
+        if ([Math]::Abs(($rowBounds.Y + $rowBounds.Height / 2) - ($buttonBounds.Y + $buttonBounds.Height / 2)) -gt 2) {
+            throw 'The folder Open button is not vertically centered in its row.'
+        }
+        $open.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+        $deadline = [DateTime]::UtcNow.AddSeconds(5)
+        do {
+            $names = @($window.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition) |
+                ForEach-Object { $_.Current.Name })
+            if (-not ($names -match 'SSH operation error:.*full disk access for remote users')) { Start-Sleep -Milliseconds 50 }
+        } while (-not ($names -match 'SSH operation error:.*full disk access for remote users') -and [DateTime]::UtcNow -lt $deadline)
+        if (-not ($names -match 'SSH operation error:.*full disk access for remote users')) {
+            throw 'Denied Desktop access did not show actionable macOS permission guidance.'
+        }
+        $pathField = Find-FixtureElement 'Mac folder' ([Windows.Automation.ControlType]::Edit)
+        if ($pathField.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).Current.Value -cne '/Users/fixture') {
+            throw 'Denied folder navigation did not restore the last accessible path.'
+        }
+        (Find-FixtureElement 'Open Public' ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+        $null = Find-FixtureElement 'This folder is empty.' ([Windows.Automation.ControlType]::Text)
+        (Find-FixtureElement 'Up' ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+        $null = Find-FixtureElement 'Receive source.txt' ([Windows.Automation.ControlType]::Button)
         Cancel-OwnedPicker 'Send a file...' 'Send a file to this Mac folder'
         Cancel-OwnedPicker 'Receive source.txt' 'Receive a new file - existing files are not replaced'
         (Find-FixtureElement 'Disconnect SSH' ([Windows.Automation.ControlType]::Button)).
@@ -140,7 +167,7 @@ public static class MacCanvasOwnedDialogInput {
             GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
         $null = Find-FixtureElement 'GitHub profile' ([Windows.Automation.ControlType]::Button)
         $null = Find-FixtureElement 'curl.red' ([Windows.Automation.ControlType]::Button)
-        $null = Find-FixtureElement 'GPL-3.0 license' ([Windows.Automation.ControlType]::Button)
+        $null = Find-FixtureElement 'AGPL-3.0 license' ([Windows.Automation.ControlType]::Button)
         $elements = $window.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition)
         $names = @($elements | ForEach-Object { $_.Current.Name })
         $attribution = @($names | Where-Object { $_ -like 'Built by *' })

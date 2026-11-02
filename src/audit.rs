@@ -583,7 +583,7 @@ pub fn error_type(error: &Error) -> &'static str {
         Error::UpdateRecovery(_) => "update_recovery",
         Error::Audit(_) => "audit",
         Error::Clipboard(_) => "clipboard",
-        Error::Transfer(_) => "file_transfer",
+        Error::Transfer(_) | Error::Sftp { .. } => "file_transfer",
         Error::Cancelled => "cancelled",
     }
 }
@@ -597,6 +597,10 @@ pub fn error_attributes(error: &Error) -> Value {
         }
         Error::Consent(reason) => attributes["security.consent.reason"] = json!(reason),
         Error::UpdateRecovery(reason) => attributes["update.recovery.detail"] = json!(reason),
+        Error::Sftp { code, .. } => {
+            attributes["error.code"] = json!(code);
+            attributes["sftp.status_code"] = json!(code);
+        }
         _ => (),
     }
     attributes

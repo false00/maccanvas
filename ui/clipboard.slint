@@ -3,6 +3,7 @@ import { GlassTheme, GlassPanel, Button, CheckBox } from "glass.slint";
 export component ClipboardOverlay inherits Rectangle {
     in-out property <bool> shared;
     in property <string> mode;
+    in property <bool> vnc-available: true;
     callback changed();
     callback close();
     callback paste-text();
@@ -22,12 +23,12 @@ export component ClipboardOverlay inherits Rectangle {
                     Text { text: "Clipboard"; color: GlassTheme.ink; font-size: 23px; font-weight: 700; }
                     Button { text: "Done"; clicked => { root.close(); } }
                 }
-                CheckBox { text: "Share plain-text clipboard over VNC"; checked <=> root.shared; toggled => { root.changed(); } }
+                CheckBox { text: "Share plain-text clipboard over VNC"; checked <=> root.shared; enabled: root.vnc-available; toggled => { root.changed(); } }
                 Text { text: root.mode; color: GlassTheme.accent; font-size: 12px; wrap: word-wrap; }
-                Text { text: "Ctrl+V sends Windows text when pasting into your Mac. Incoming Mac text can replace your Windows clipboard while the viewer is active. Clipboard contents are never logged."; color: GlassTheme.muted; wrap: word-wrap; font-size: 13px; }
-                Text { text: "VNC clipboard traffic is not encrypted. Use a VPN. Files, images, and rich text are not shared."; color: GlassTheme.muted; wrap: word-wrap; font-size: 12px; }
+                Text { text: root.vnc-available ? "Ctrl+V sends Windows text when pasting into your Mac. Incoming Mac text can replace your Windows clipboard while the viewer is active. Clipboard contents are never logged." : "Use the encrypted SSH clipboard below while connected with HEVC. Standard VNC clipboard sharing is unavailable in this transport."; color: GlassTheme.muted; wrap: word-wrap; font-size: 13px; }
+                if root.vnc-available : Text { text: "VNC clipboard traffic is not encrypted. Use a VPN. Files, images, and rich text are not shared."; color: GlassTheme.muted; wrap: word-wrap; font-size: 12px; }
                 HorizontalLayout {
-                    Button { text: "Paste Windows text"; enabled: root.shared; clicked => { root.paste-text(); } }
+                    Button { text: "Paste Windows text"; enabled: root.shared && root.vnc-available; clicked => { root.paste-text(); } }
                     Button { text: "Encrypted SSH clipboard"; clicked => { root.ssh-files(); } }
                 }
                 Text { text: "SSH also supports Unicode on Macs without the VNC UTF-8 extension. It requires macOS Remote Login."; color: GlassTheme.muted; wrap: word-wrap; font-size: 11px; }

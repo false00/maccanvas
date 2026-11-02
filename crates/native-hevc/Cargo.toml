@@ -1,0 +1,12 @@
+[package]
+name = "native-hevc"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "AGPL-3.0-or-later"
+description = "Bounded, statically linked native HEVC decoding for MacCanvas"
+build = "build.rs"
+exclude = [".validation"]
+
+[build-dependencies]
+cc = { version = "1.2", features = ["parallel"] }

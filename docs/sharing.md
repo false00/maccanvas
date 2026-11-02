@@ -6,6 +6,9 @@ is installed.
 
 ## VNC clipboard
 
+HEVC sessions use the encrypted SSH clipboard described below. Automatic VNC
+clipboard sharing is available in the standard VNC modes.
+
 1. Connect to the Mac.
 2. Open **Clipboard** and enable **Share plain-text clipboard over VNC**.
 3. Use Ctrl+C / Ctrl+V with the default Ctrl-to-Command mapping.
@@ -80,8 +83,21 @@ There is deliberately no “accept changed keys” switch.
   leave a `.maccanvas-*.part` or `.maccanvas-download-*.part` file.
 
 The progress display shows the current phase and effective file-data rate.
-The main network graph includes VNC and SSH stream traffic. The VNC bandwidth
+The main network graph includes VNC, HEVC/SRTP, and SSH traffic. The VNC bandwidth
 target does not throttle SSH transfers.
+
+### Permission denied
+
+SSH login permission and file access are separate. If the Mac allows your home
+or Public folder but denies Desktop, Documents or Downloads, check
+**System Settings > General > Sharing > Remote Login > Allow full disk access
+for remote users** on the Mac. Reconnect SSH after changing that setting.
+Also check the folder's **Get Info > Sharing & Permissions** for the SSH account.
+MacCanvas cannot override macOS privacy rules or filesystem permissions.
+
+A denied folder leaves SSH connected and keeps the last accessible folder
+visible. Enter another path to continue. If the initial home folder is denied,
+file sending stays disabled until an accessible folder has been opened.
 
 Downloads produce a SHA-256 receipt of the received stream, not an independently
 signed checksum or an APFS snapshot. Avoid transferring a file while another
@@ -112,6 +128,7 @@ Clipboard audit events contain only direction, encoding, byte counts, and outcom
 - [Apache Guacamole: VNC clipboard encoding](https://guacamole.apache.org/doc/gug/configuring-guacamole.html#clipboard-encoding)
 - [SFTP version 3 specification](https://datatracker.ietf.org/doc/html/draft-ietf-secsh-filexfer-02)
 - [Apple NSPasteboard](https://developer.apple.com/documentation/appkit/nspasteboard)
+- [iShareScreen: Apple High Performance protocol](https://github.com/renegadelink/iShareScreen/blob/9ab40d3a3151524f954cff9d6239d891197c1705/docs/apple_vnc_rfc.md)
 
 Apple documents richer Mac-to-Mac sharing, but those features are not a portable
 standard-RFB file-transfer contract. Extended Clipboard's file-format bit is

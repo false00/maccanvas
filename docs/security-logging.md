@@ -32,7 +32,8 @@ Uninstalling the viewer does not erase audit evidence.
 | Connections | Profile UUID, configured host/port, actual local/remote socket endpoints, protocol, authentication source/type and outcomes, duration, byte totals |
 | Consent and vault | Hello requested/completed/denied, safe local denial reasons, credential read/save/delete requests and outcomes; no secret values |
 | SSH trust | Host-key algorithm, SHA-256 fingerprint, first-use approval/pinning, changed-key blocks before credential access |
-| Operations | Settings persistence, directory-browse path/count, file-transfer requests/commit/completion/cancellation, selected paths, sizes, source modification time when available, SHA-256 receipts, temporary-file paths and cleanup failures |
+| HEVC | Authentication/control/media negotiation stages, codec and geometry, actual first decoded frame, safe RTP/reassembly counters, keyframe recovery and decode failures; no keys, encoded payloads, or images |
+| Operations | Settings persistence, directory-browse path/count/failures, numeric SFTP status (`error.code`, `sftp.status_code`), file-transfer requests/commit/completion/cancellation, selected paths, sizes, source modification time when available, SHA-256 receipts, temporary-file paths and cleanup failures |
 | Updates | Official check outcomes, expected artifact version/size/hash, verification/preflight, replacement and recovery outcomes |
 | Clipboard | Direction, encoding, byte counts, accepted/ignored/applied outcomes; never clipboard data or hashes |
 | Failures | Error category and native I/O code when available, audit-health failures, panic source location/thread without the panic payload |

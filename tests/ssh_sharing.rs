@@ -63,6 +63,7 @@ struct Evidence {
     authentications: AtomicUsize,
     delay_ms: AtomicUsize,
     corrupt: AtomicUsize,
+    denied: Mutex<HashSet<String>>,
 }
 
 struct Fixture {
@@ -91,6 +92,11 @@ impl Fixture {
                 .to_string(),
         };
         let evidence = Arc::new(Evidence::default());
+        evidence
+            .denied
+            .lock()
+            .unwrap()
+            .insert(format!("{HOME}/Desktop"));
         evidence.files.lock().unwrap().insert(
             format!("{HOME}/source.txt"),
             b"FILE_CONTENTS_MUST_NOT_BE_LOGGED\n".repeat(3000),
@@ -292,26 +298,36 @@ impl russh_sftp::server::Handler for Sftp {
         })
     }
     async fn opendir(&mut self, id: u32, path: String) -> Result<Handle, StatusCode> {
-        if path != HOME {
+        if self.data.denied.lock().unwrap().contains(&path) {
+            return Err(StatusCode::PermissionDenied);
+        }
+        if path != HOME && path != format!("{HOME}/Public") {
             return Err(StatusCode::NoSuchFile);
         }
         self.listed.remove(&path);
         Ok(Handle { id, handle: path })
     }
     async fn readdir(&mut self, id: u32, handle: String) -> Result<Name, StatusCode> {
-        if !self.listed.insert(handle) {
+        if !self.listed.insert(handle.clone()) || handle == format!("{HOME}/Public") {
             return Err(StatusCode::Eof);
         }
         let data = self.data.files.lock().unwrap();
-        Ok(Name {
-            id,
-            files: data
-                .iter()
-                .map(|(path, bytes)| {
-                    File::new(path.rsplit('/').next().unwrap(), attributes(bytes.len()))
-                })
-                .collect(),
-        })
+        let mut files: Vec<_> = data
+            .iter()
+            .map(|(path, bytes)| {
+                File::new(path.rsplit('/').next().unwrap(), attributes(bytes.len()))
+            })
+            .collect();
+        for name in ["Desktop", "Public"] {
+            files.push(File::new(
+                name,
+                FileAttributes {
+                    permissions: Some(0o040700),
+                    ..FileAttributes::empty()
+                },
+            ));
+        }
+        Ok(Name { id, files })
     }
     async fn close(&mut self, id: u32, handle: String) -> Result<Status, StatusCode> {
         self.handles.remove(&handle);
@@ -446,8 +462,88 @@ fn connected(client: &Client, fixture: &Fixture) {
         }
         Event::Directory { .. } => true,
         Event::Failed(error) => panic!("Fixture connect failed: {error}"),
+        Event::DirectoryFailed { error, .. } => panic!("Fixture folder failed: {error}"),
         _ => false,
     });
+}
+
+#[test]
+fn denied_directories_keep_ssh_connected_and_allow_recovery() {
+    for deny_home in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut audit = Audit::start(directory.path().join("audit")).unwrap();
+        let fixture = Fixture::new();
+        if deny_home {
+            fixture.evidence.denied.lock().unwrap().insert(HOME.into());
+        }
+        let client = fixture.client(&audit, Some(fixture.key.clone()), false);
+        if !deny_home {
+            connected(&client, &fixture);
+            client
+                .command(Command::List(format!("{HOME}/Desktop")))
+                .unwrap();
+        }
+        wait(&client, |event| match event {
+            Event::DirectoryFailed { path, error } => {
+                assert_eq!(
+                    path,
+                    if deny_home {
+                        ".".into()
+                    } else {
+                        format!("{HOME}/Desktop")
+                    }
+                );
+                assert!(error.contains("full disk access for remote users"));
+                assert!(error.contains("account"));
+                true
+            }
+            Event::Failed(error) => panic!("A directory denial became a fatal SSH error: {error}"),
+            Event::Closed => panic!("SSH closed after a recoverable directory denial"),
+            _ => false,
+        });
+        assert!(!client.is_finished());
+        client
+            .command(Command::List(format!("{HOME}/Public")))
+            .unwrap();
+        wait(&client, |event| match event {
+            Event::Directory { path, entries } => {
+                assert_eq!(path, format!("{HOME}/Public"));
+                assert!(entries.is_empty());
+                true
+            }
+            Event::Failed(error) | Event::DirectoryFailed { error, .. } => {
+                panic!("An allowed directory could not be opened: {error}")
+            }
+            _ => false,
+        });
+        client
+            .command(Command::Download {
+                remote: format!("{HOME}/source.txt"),
+                local: directory.path().join("received.txt"),
+            })
+            .unwrap();
+        wait(&client, |event| match event {
+            Event::Completed { .. } => true,
+            Event::Failed(error) => panic!("The surviving SSH session could not transfer: {error}"),
+            _ => false,
+        });
+        assert_eq!(fixture.evidence.authentications.load(Ordering::Relaxed), 1);
+        client.finish().unwrap();
+        audit.shutdown().unwrap();
+        let records = std::fs::read_to_string(audit.audit().path()).unwrap();
+        assert!(
+            records
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .any(|record| {
+                    record["event_name"] == "ssh.operation.failed"
+                        && record["attributes"]["sftp.status_code"] == 3
+                        && record["attributes"]["error.type"] == "file_transfer"
+                        && record["attributes"]["operation.name"] == "directory_list"
+                })
+        );
+        maccanvas::audit::verify(&[audit.audit().path()]).unwrap();
+    }
 }
 
 #[test]

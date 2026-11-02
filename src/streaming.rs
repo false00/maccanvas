@@ -17,10 +17,12 @@ pub enum Encoding {
     Rre,
     Corre,
     Raw,
+    Hevc30,
+    Hevc60,
 }
 
 impl Encoding {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 11] = [
         Self::Auto,
         Self::Zrle,
         Self::Tight,
@@ -30,7 +32,21 @@ impl Encoding {
         Self::Rre,
         Self::Corre,
         Self::Raw,
+        Self::Hevc30,
+        Self::Hevc60,
     ];
+
+    pub fn is_hevc(self) -> bool {
+        matches!(self, Self::Hevc30 | Self::Hevc60)
+    }
+
+    pub fn fps_ceiling(self) -> u16 {
+        match self {
+            Self::Hevc30 => 30,
+            Self::Hevc60 => 60,
+            _ => 120,
+        }
+    }
 
     pub fn from_index(index: i32) -> Result<Self> {
         usize::try_from(index)
@@ -57,6 +73,8 @@ impl Encoding {
             Self::Rre => "RRE",
             Self::Corre => "CoRRE",
             Self::Raw => "Raw",
+            Self::Hevc30 => "HEVC / H.265 - 30 FPS",
+            Self::Hevc60 => "HEVC / H.265 - 60 FPS",
         }
     }
 
@@ -89,6 +107,12 @@ impl Encoding {
             Self::Raw => {
                 "Raw: no pixel compression and the lowest compression CPU cost. Best only on fast trusted links; full-frame 4K motion can require several gigabits per second."
             }
+            Self::Hevc30 => {
+                "Apple High Performance HEVC/H.265 at up to 30 FPS. Lower stream and decoding load than 60 FPS; preserves the Mac's physical desktop. Requires Mac account login and UDP on the VNC port and the next port. A native decoder is bundled; no codec extension is needed. Reconnect to change transports. Use Files for encrypted clipboard."
+            }
+            Self::Hevc60 => {
+                "Apple High Performance HEVC/H.265 at up to 60 FPS. Smoother motion with higher CPU and bandwidth use. Uses the same physical Mac desktop, encrypted control and SRTP video, with bundled native decoding. Requires a compatible Mac, Mac account login and UDP on both media ports. Reconnect to change the HEVC preset."
+            }
         }
     }
 }
@@ -117,6 +141,11 @@ impl Default for StreamSettings {
 
 impl StreamSettings {
     pub fn validate(self) -> Result<()> {
+        if self.encoding.is_hevc() && self.target_kbps != 0 {
+            return Err(Error::Configuration(
+                "HEVC uses the Mac's adaptive video bitrate; the VNC request-bandwidth target does not apply".into()
+            ));
+        }
         if self.compression > 9
             || self.jpeg_quality > 9
             || !(1..=120).contains(&self.max_fps)
@@ -129,7 +158,13 @@ impl StreamSettings {
         Ok(())
     }
 
-    pub fn encodings(self) -> Vec<i32> {
+    pub fn encodings(self) -> Result<Vec<i32>> {
+        if self.encoding.is_hevc() {
+            return Err(Error::Configuration(
+                "HEVC uses Apple's High Performance transport, not an RFB rectangle encoding"
+                    .into(),
+            ));
+        }
         let preferred = match self.encoding {
             Encoding::Auto | Encoding::Zrle => 16,
             Encoding::Tight | Encoding::TightJpeg => 7,
@@ -138,6 +173,7 @@ impl StreamSettings {
             Encoding::Rre => 2,
             Encoding::Corre => 4,
             Encoding::Raw => 0,
+            Encoding::Hevc30 | Encoding::Hevc60 => unreachable!("checked HEVC transport"),
         };
         let mut encodings = vec![1, preferred];
         if self.encoding == Encoding::Auto {
@@ -162,12 +198,12 @@ impl StreamSettings {
         if self.encoding == Encoding::TightJpeg {
             encodings.push(-32 + i32::from(self.jpeg_quality));
         }
-        encodings
+        Ok(encodings)
     }
 
     pub fn write_encodings(self, writer: &mut impl Write) -> Result<()> {
         self.validate()?;
-        let encodings = self.encodings();
+        let encodings = self.encodings()?;
         writer.write_all(&[2, 0])?;
         writer.write_all(&(encodings.len() as u16).to_be_bytes())?;
         for encoding in encodings {
@@ -198,6 +234,7 @@ pub fn encoding_name(id: i32) -> &'static str {
         6 => "Zlib",
         7 => "Tight",
         16 => "ZRLE",
+        crate::apple_hps::COUNTER_ENCODING => "HEVC / H.265",
         _ => "Waiting for pixels",
     }
 }
@@ -219,6 +256,7 @@ mod tests {
         assert!(
             !settings
                 .encodings()
+                .unwrap()
                 .iter()
                 .any(|id| (-32..=-23).contains(id))
         );
@@ -231,9 +269,14 @@ mod tests {
                 encoding,
                 ..Default::default()
             };
-            assert!(settings.encodings().contains(&0));
-            assert!(settings.encodings().contains(&1));
-            assert!(settings.encodings().contains(&-250));
+            if encoding.is_hevc() {
+                assert!(settings.encodings().is_err());
+                assert!(settings.write_encodings(&mut Vec::new()).is_err());
+            } else {
+                assert!(settings.encodings().unwrap().contains(&0));
+                assert!(settings.encodings().unwrap().contains(&1));
+                assert!(settings.encodings().unwrap().contains(&-250));
+            }
             settings.validate().unwrap();
             assert_eq!(Encoding::from_index(encoding.index()).unwrap(), encoding);
         }
@@ -246,8 +289,8 @@ mod tests {
             jpeg_quality: 4,
             ..Default::default()
         };
-        assert!(settings.encodings().contains(&-28));
-        assert!(settings.encodings().contains(&7));
+        assert!(settings.encodings().unwrap().contains(&-28));
+        assert!(settings.encodings().unwrap().contains(&7));
     }
 
     #[test]

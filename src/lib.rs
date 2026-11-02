@@ -8,6 +8,7 @@ pub const AUTHOR: &str = "@false00";
 pub const AUTHOR_GITHUB: &str = "https://github.com/false00";
 pub const REPOSITORY: &str = "https://github.com/false00/maccanvas";
 
+pub mod apple_hps;
 pub mod audit;
 pub mod auth;
 pub mod clipboard;
