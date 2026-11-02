@@ -143,7 +143,11 @@ public static class MacCanvasOwnedDialogInput {
         $null = Find-FixtureElement 'GPL-3.0 license' ([Windows.Automation.ControlType]::Button)
         $elements = $window.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition)
         $names = @($elements | ForEach-Object { $_.Current.Name })
-        if (-not ($names -match 'Built by Juan Ortega')) { throw 'About is missing the public author information.' }
+        $attribution = @($names | Where-Object { $_ -like 'Built by *' })
+        if ($attribution.Count -ne 1 -or $attribution[0] -cne 'Built by @false00') {
+            throw 'About must credit only the maintainer handle.'
+        }
+        if ($names -match 'Incident responder|Builder\.') { throw 'About must not display a personal tagline.' }
         if (-not ($names -match '^Built: \d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC')) { throw 'About is missing its UTC build timestamp.' }
         if (-not ($names -match '^Source: [0-9a-f]{40}')) { throw 'About is missing the full source revision.' }
         $null = Find-FixtureElement 'Target: x86_64-pc-windows-msvc' ([Windows.Automation.ControlType]::Text)

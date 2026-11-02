@@ -7,7 +7,7 @@ export component AboutOverlay inherits Rectangle {
     in property <string> revision;
     in property <string> target;
     in property <string> compiler;
-    in property <string> author: "Juan Ortega";
+    in property <string> author: "@false00";
     in property <string> log-path;
     callback close();
     callback open-link(int);
@@ -37,7 +37,7 @@ export component AboutOverlay inherits Rectangle {
                 VerticalLayout {
                     spacing: 15px; padding-right: 8px;
                     Text { text: "Your Mac. Your Windows screen."; color: GlassTheme.ink; font-size: 17px; font-weight: 600; }
-                    Text { text: "Built by " + root.author + "  (@false00)\nIncident responder. Builder."; color: GlassTheme.muted; wrap: word-wrap; font-size: 13px; }
+                    Text { text: "Built by " + root.author; color: GlassTheme.muted; wrap: word-wrap; font-size: 13px; }
                     HorizontalLayout {
                         Button { text: "GitHub profile"; clicked => { root.open-link(0); } }
                         Button { text: "curl.red"; quiet: true; clicked => { root.open-link(3); } }

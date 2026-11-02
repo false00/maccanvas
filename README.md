@@ -148,7 +148,7 @@ The pinned toolchain builds `target\x86_64-pc-windows-msvc\release\maccanvas.exe
 Rust + Slint, software rendering, static Microsoft C runtime.
 Windows releases are built and tested in GitHub Actions.
 
-Maintained by [Juan Ortega (@false00)](https://github.com/false00).
+Maintained by [@false00](https://github.com/false00).
 **About** shows the version, UTC build date, source revision, target, and compiler.
 
 An independent project inspired by [TigerVNC](https://tigervnc.org/).
