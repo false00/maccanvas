@@ -1,0 +1,31 @@
+name: Native Apple audio fixture
+
+on:
+  push:
+    branches: ['audio-conformance-*']
+    paths:
+      - scripts/generate_macos_audio_fixture.c
+      - .github/workflows/audio-fixture.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  encode:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Encode original synthetic audio with native AudioToolbox
+        run: |
+          clang -std=c11 -O2 scripts/generate_macos_audio_fixture.c -framework AudioToolbox -framework AudioUnit -framework CoreAudio -o native-audio-fixture
+          ./native-audio-fixture stereo440_880.aaceld
+          shasum -a 256 stereo440_880.aaceld audio-config.bin
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: apple-aac-eld-fixture
+          path: |
+            stereo440_880.aaceld
+            audio-config.bin
+          if-no-files-found: error
+          retention-days: 3
