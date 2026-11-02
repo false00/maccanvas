@@ -9,9 +9,9 @@
 #include <string.h>
 
 #define CHECK(call) do { \
-    OSStatus status = (call); \
-    if (status != noErr) { \
-        fprintf(stderr, "%s: OSStatus %d (0x%08x)\n", #call, (int)status, (unsigned)status); \
+    OSStatus check_status = (call); \
+    if (check_status != noErr) { \
+        fprintf(stderr, "%s: OSStatus %d (0x%08x)\n", #call, (int)check_status, (unsigned)check_status); \
         return 1; \
     } \
 } while (0)

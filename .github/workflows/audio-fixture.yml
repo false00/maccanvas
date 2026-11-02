@@ -6,6 +6,7 @@ on:
     paths:
       - scripts/generate_macos_audio_fixture.c
       - .github/workflows/audio-fixture.yml
+      - scripts/check_aac_fixture.py
   workflow_dispatch:
 
 permissions:
@@ -21,7 +22,15 @@ jobs:
           clang -std=c11 -O2 scripts/generate_macos_audio_fixture.c -framework AudioToolbox -framework AudioUnit -framework CoreAudio -o native-audio-fixture
           ./native-audio-fixture stereo440_880.aaceld
           shasum -a 256 stereo440_880.aaceld audio-config.bin
+      - name: Verify the portable decoder against genuine Apple audio
+        run: |
+          git clone --quiet --filter=blob:none --no-checkout https://github.com/ittiam-systems/libxaac.git codec-source
+          git -C codec-source checkout --quiet --detach 2fbadd57bca46693b7a077bcf1513131106d960c
+          cmake -S codec-source -B codec-build -DCMAKE_BUILD_TYPE=Release "-DCMAKE_C_FLAGS=-O2 -fwrapv -fno-strict-aliasing"
+          cmake --build codec-build --target xaacdec --parallel 3
+          python3 scripts/check_aac_fixture.py codec-build/xaacdec stereo440_880.aaceld audio-config.bin
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
         with:
           name: apple-aac-eld-fixture
           path: |
