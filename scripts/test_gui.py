@@ -284,7 +284,7 @@ def wait(predicate, process, fixture, description, timeout=20):
         if result:
             return result
         time.sleep(0.05)
-    raise AssertionError(f"Timed out: {description}")
+    raise AssertionError(f"Timed out: {description}; recent fixture pointer events: {fixture.pointers[-5:]}")
 
 
 def main(executable, native_messages=False):
@@ -421,6 +421,8 @@ def main(executable, native_messages=False):
             configuration = json.loads(settings)
             assert configuration["streaming"]["target_kbps"] == 1000
             assert configuration["streaming"]["max_fps"] == 15
+            assert configuration["streaming"]["compression"] == 3
+            assert -253 in fixture.offers[-1]
             assert "dark_theme" not in configuration and "hello_for_all_connections" not in configuration
             print("PASS: profiles contain neither username nor password")
         finally:

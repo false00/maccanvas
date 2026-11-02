@@ -13,3 +13,4 @@ pub mod session;
 pub mod streaming;
 pub mod telemetry;
 pub mod theme;
+pub mod updates;

@@ -2,10 +2,10 @@ export global GlassTheme {
     in-out property <bool> dark: false;
     in-out property <bool> motion: true;
     in-out property <bool> effects: true;
-    out property <color> ink: dark ? #edf5fc : #183348;
-    out property <color> muted: dark ? #a3b8c9 : #526b80;
-    out property <color> accent: dark ? #80e9cd : #08796f;
-    out property <color> edge: dark ? #e0f3ff37 : #ffffffba;
+    out property <color> ink: dark ? #f5f5f7 : #1d1d1f;
+    out property <color> muted: dark ? #aeaeb2 : #636366;
+    out property <color> accent: dark ? #0a84ff : #007aff;
+    out property <color> edge: dark ? #ffffff22 : #c7c7cc88;
 }
 
 export component GlassPanel inherits Rectangle {
@@ -13,12 +13,12 @@ export component GlassPanel inherits Rectangle {
     in property <bool> raised: false;
     border-radius: radius;
     border-width: 1px;
-    border-color: GlassTheme.effects ? GlassTheme.edge : (GlassTheme.dark ? #425669 : #cbd9e4);
-    background: !GlassTheme.effects ? (GlassTheme.dark ? #1c2b3b : #ffffff)
-        : (GlassTheme.dark ? #1c3043dd : #f6fbffdd);
+    border-color: GlassTheme.effects ? GlassTheme.edge : (GlassTheme.dark ? #48484a : #c7c7cc);
+    background: !GlassTheme.effects ? (GlassTheme.dark ? #1c1c1e : #ffffff)
+        : (GlassTheme.dark ? #1c1c1ed9 : #ffffffeb);
     drop-shadow-offset-y: raised ? 10px : 6px;
     drop-shadow-blur: GlassTheme.effects ? (raised ? 24px : 14px) : 0px;
-    drop-shadow-color: GlassTheme.dark ? #020c1826 : #18314c15;
+    drop-shadow-color: GlassTheme.dark ? #00000066 : #00000012;
     if GlassTheme.effects : Rectangle {
         x: root.radius / 2; y: 1px; width: max(0px, root.width - root.radius);
         height: 1px; background: GlassTheme.dark ? #ffffff22 : #ffffffe0;
@@ -35,8 +35,7 @@ export component Button inherits Rectangle {
     callback clicked();
     property <bool> key-down: false;
     property <bool> pressed: pointer.pressed || key-down;
-    property <color> foreground: root.primary
-        ? (GlassTheme.dark ? #0a332b : #ffffff) : GlassTheme.ink;
+    property <color> foreground: root.primary ? #ffffff : GlassTheme.ink;
     min-width: max(36px, content.min-width);
     min-height: 34px;
     preferred-height: 36px;
@@ -47,23 +46,22 @@ export component Button inherits Rectangle {
     border-radius: 12px;
     clip: true;
     border-width: 1px;
-    border-color: root.primary ? (GlassTheme.dark ? #b7ffe9 : #469d92)
+    border-color: root.primary ? (GlassTheme.dark ? #409cff : #0070e8)
         : (root.quiet ? transparent : GlassTheme.edge);
-    background: root.primary ? (GlassTheme.dark ? #63d8bb : #08796f)
-        : (root.quiet ? transparent : (GlassTheme.dark ? #38566e80 : #f5faffd9));
+    background: root.primary ? GlassTheme.accent
+        : (root.quiet ? transparent : (GlassTheme.dark ? #2c2c2ecc : #ffffffeb));
     opacity: root.enabled ? 1 : 0.4;
     accessible-role: button;
     accessible-label: root.text;
     accessible-enabled: root.enabled;
     accessible-action-default => { if root.enabled { root.clicked(); } }
-
     if !root.quiet && GlassTheme.effects : Rectangle {
         x: root.border-radius / 2; y: 1px; width: root.width - root.border-radius;
         height: 1px; background: root.primary ? #ffffff45 : #ffffff25;
     }
     Rectangle {
         border-radius: root.border-radius;
-        background: GlassTheme.dark ? #ffffff : #416d88;
+        background: GlassTheme.dark ? #ffffff : #000000;
         opacity: !root.enabled ? 0 : (root.pressed ? 0.16 : (pointer.has-hover ? 0.07 : 0));
         animate opacity { duration: GlassTheme.motion ? 130ms : 0ms; easing: ease-out; }
     }
@@ -77,13 +75,11 @@ export component Button inherits Rectangle {
         if root.text != "" : Text {
             text: root.text; color: root.foreground;
             font-size: 13px; font-weight: root.primary ? 600 : 500;
-            horizontal-alignment: center; vertical-alignment: center;
-            accessible-role: none;
+            horizontal-alignment: center; vertical-alignment: center; accessible-role: none;
         }
     }
     pointer := TouchArea {
-        enabled: root.enabled;
-        mouse-cursor: MouseCursor.pointer;
+        enabled: root.enabled; mouse-cursor: MouseCursor.pointer;
         clicked => { keyboard.focus(); if root.enabled { root.clicked(); } }
     }
     keyboard := FocusScope {
@@ -108,6 +104,126 @@ export component Button inherits Rectangle {
     if keyboard.has-focus && root.enabled : Rectangle {
         x: 2px; y: 2px; width: root.width - 4px; height: root.height - 4px;
         border-radius: root.border-radius - 2px; background: transparent;
+        border-width: 2px; border-color: GlassTheme.accent;
+    }
+}
+
+export component CheckBox inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    in-out property <bool> checked: false;
+    callback toggled();
+    background: transparent;
+    min-height: max(26px, label.preferred-height);
+    max-height: max(26px, label.preferred-height);
+    vertical-stretch: 0;
+    forward-focus: keyboard;
+    accessible-role: checkbox;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-checkable: true;
+    accessible-checked <=> root.checked;
+    accessible-action-default => { root.toggle(); }
+    opacity: root.enabled ? 1 : 0.4;
+    function toggle() {
+        if root.enabled { root.checked = !root.checked; root.toggled(); }
+    }
+    Rectangle {
+        x: 0px; y: (parent.height - self.height) / 2;
+        width: 18px; height: 18px; border-radius: 5px;
+        background: root.checked ? GlassTheme.accent : (GlassTheme.dark ? #2c2c2e : #ffffff);
+        border-width: 1px;
+        border-color: root.checked ? GlassTheme.accent : (GlassTheme.dark ? #636366 : #b6b6bb);
+        animate background { duration: GlassTheme.motion ? 130ms : 0ms; }
+        if root.checked : Image { source: @image-url("../assets/check.svg"); }
+    }
+    label := Text {
+        x: 27px; width: max(0px, root.width - 27px); height: parent.height;
+        text: root.text; color: GlassTheme.ink; font-size: 13px;
+        vertical-alignment: center; wrap: word-wrap; accessible-role: none;
+    }
+    TouchArea {
+        enabled: root.enabled; mouse-cursor: MouseCursor.pointer;
+        clicked => { keyboard.focus(); root.toggle(); }
+    }
+    keyboard := FocusScope {
+        width: 0px; enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.Space || event.text == Key.Return {
+                if !event.repeat { root.toggle(); }
+                return accept;
+            }
+            return reject;
+        }
+    }
+    if keyboard.has-focus && root.enabled : Rectangle {
+        x: -3px; y: -2px; width: 24px; height: root.height + 4px;
+        border-radius: 8px; background: transparent; border-width: 2px; border-color: GlassTheme.accent;
+    }
+}
+
+export component Slider inherits Rectangle {
+    in property <float> minimum: 0;
+    in property <float> maximum: 100;
+    in property <float> step: 1;
+    in property <bool> enabled: true;
+    in-out property <float> value: 0;
+    callback changed();
+    background: transparent;
+    min-height: 28px; max-height: 32px; min-width: 80px;
+    horizontal-stretch: 1;
+    forward-focus: keyboard;
+    accessible-role: slider;
+    accessible-enabled: root.enabled;
+    accessible-value: root.value;
+    accessible-value-minimum: root.minimum;
+    accessible-value-maximum: root.maximum;
+    accessible-value-step: root.step;
+    accessible-action-set-value(v) => { if v.is-float() { root.set-value(v.to-float()); } }
+    accessible-action-increment => { root.set-value(root.value + root.step); }
+    accessible-action-decrement => { root.set-value(root.value - root.step); }
+    opacity: root.enabled ? 1 : 0.4;
+    property <float> fraction: clamp((root.value - root.minimum) / max(1, root.maximum - root.minimum), 0, 1);
+    function set-value(next: float) {
+        if root.enabled {
+            root.value = clamp(root.minimum + round((next - root.minimum) / max(0.001, root.step)) * root.step, root.minimum, root.maximum);
+            root.changed();
+        }
+    }
+    function point-value(position: float) {
+        root.set-value(root.minimum + clamp((position - 10) / max(1, (root.width / 1px) - 20), 0, 1) * (root.maximum - root.minimum));
+    }
+    Rectangle {
+        x: 10px; y: (parent.height - 4px) / 2; width: root.width - 20px; height: 4px;
+        border-radius: 2px; background: GlassTheme.dark ? #48484a : #d1d1d6;
+        Rectangle { width: parent.width * root.fraction; border-radius: 2px; background: GlassTheme.accent; }
+    }
+    Rectangle {
+        x: (root.width - 20px) * root.fraction; y: (parent.height - 20px) / 2;
+        width: 20px; height: 20px; border-radius: 10px;
+        background: #ffffff; border-width: 1px; border-color: #00000014;
+        drop-shadow-blur: 3px; drop-shadow-offset-y: 1px; drop-shadow-color: #00000024;
+    }
+    pointer := TouchArea {
+        enabled: root.enabled; mouse-cursor: MouseCursor.pointer;
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down { keyboard.focus(); root.point-value(self.mouse-x / 1px); }
+        }
+        moved => { if self.pressed { root.point-value(self.mouse-x / 1px); } }
+    }
+    keyboard := FocusScope {
+        width: 0px; enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.LeftArrow || event.text == Key.DownArrow { root.set-value(root.value - root.step); return accept; }
+            if event.text == Key.RightArrow || event.text == Key.UpArrow { root.set-value(root.value + root.step); return accept; }
+            if event.text == Key.Home { root.set-value(root.minimum); return accept; }
+            if event.text == Key.End { root.set-value(root.maximum); return accept; }
+            return reject;
+        }
+    }
+    if keyboard.has-focus && root.enabled : Rectangle {
+        x: (root.width - 20px) * root.fraction - 3px; y: (parent.height - 26px) / 2;
+        width: 26px; height: 26px; border-radius: 13px; background: transparent;
         border-width: 2px; border-color: GlassTheme.accent;
     }
 }

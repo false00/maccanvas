@@ -1,6 +1,9 @@
 #Requires -Version 5.1
 [CmdletBinding()]
-param([string]$Executable = '')
+param(
+    [string]$Executable = '',
+    [ValidateSet('auto', 'light', 'dark')][string]$PreviewTheme = 'auto'
+)
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient
@@ -53,6 +56,7 @@ $settings = @{
 $start = [Diagnostics.ProcessStartInfo]::new()
 $start.FileName = (Resolve-Path -LiteralPath $Executable).Path
 $start.Arguments = "--data-dir `"$temporary`""
+if ($PreviewTheme -ne 'auto') { $start.Arguments += " --preview-theme $PreviewTheme" }
 $start.UseShellExecute = $false
 $start.CreateNoWindow = $true
 $start.RedirectStandardError = $true
@@ -92,7 +96,8 @@ try {
     Start-Sleep -Seconds 1
     $images = Join-Path $root 'docs\images'
     $null = [IO.Directory]::CreateDirectory($images)
-    Capture-OwnedWindow (Join-Path $images 'connections.png')
+    $suffix = if ($PreviewTheme -eq 'auto') { '' } else { "-$PreviewTheme" }
+    Capture-OwnedWindow (Join-Path $images "connections$suffix.png")
     $window = [Windows.Automation.AutomationElement]::FromHandle($handle)
     $buttonCondition = [Windows.Automation.AndCondition]::new(
         [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ControlTypeProperty, [Windows.Automation.ControlType]::Button),
@@ -110,7 +115,7 @@ try {
     if ($null -eq $window.FindFirst([Windows.Automation.TreeScope]::Descendants, $helloCondition)) {
         throw 'Mandatory Windows Hello protection is not visible.'
     }
-    Capture-OwnedWindow (Join-Path $images 'saved-login.png')
+    if ($PreviewTheme -eq 'auto') { Capture-OwnedWindow (Join-Path $images 'saved-login.png') }
     $allCondition = [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty, 'Show saved Macs')
     $window.FindFirst([Windows.Automation.TreeScope]::Descendants, $allCondition).
         GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()

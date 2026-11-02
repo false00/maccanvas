@@ -6,6 +6,8 @@ mod app;
 fn start() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = std::env::args().skip(1);
     let mut data_directory = None;
+    let mut preview_theme = None;
+    let mut preview_update = false;
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--version" => {
@@ -32,10 +34,20 @@ fn start() -> Result<(), Box<dyn std::error::Error>> {
                     arguments.next().ok_or("--data-dir requires a directory")?,
                 ));
             }
+            "--preview-theme" if cfg!(debug_assertions) && preview_theme.is_none() => {
+                preview_theme = Some(match arguments.next().as_deref() {
+                    Some("dark") => true,
+                    Some("light") => false,
+                    _ => return Err("Development theme preview must be light or dark".into()),
+                });
+            }
+            "--preview-update" if cfg!(debug_assertions) && !preview_update => {
+                preview_update = true;
+            }
             _ => return Err(format!("Unsupported argument: {argument}. Use --help.").into()),
         }
     }
-    app::run(data_directory)?;
+    app::run(data_directory, preview_theme, preview_update)?;
     Ok(())
 }
 

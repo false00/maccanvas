@@ -14,6 +14,10 @@ pub enum Error {
     Configuration(String),
     #[error("Display: {0}")]
     Display(String),
+    #[error("Update: {0}")]
+    Update(String),
+    #[error("Update recovery: {0}")]
+    UpdateRecovery(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

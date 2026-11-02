@@ -2574,7 +2574,7 @@ dependencies = [
 
 [[package]]
 name = "maccanvas"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "aes",
  "crypto-bigint",
@@ -2587,12 +2587,16 @@ dependencies = [
  "md-5",
  "raw-window-handle",
  "resvg",
+ "self-replace",
+ "semver",
  "serde",
  "serde_json",
+ "sha2",
  "slint",
  "slint-build",
  "tempfile",
  "thiserror 2.0.21",
+ "url",
  "uuid",
  "windows",
  "windows-future",
@@ -3851,6 +3855,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "self-replace"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "609c5606d9d357b26e4ee1a7a01beac396628d0fa01ebbade2a09cefb88e65af"
+dependencies = [
+ "fastrand",
+ "tempfile",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3927,6 +3942,17 @@ checksum = "66cf8fedced2fcf12406bcb34223dffb92eaf34908ede12fed414c82b7f00b3e"
 dependencies = [
  "base16ct",
  "serde",
+]
+
+[[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
 ]
 
 [[package]]

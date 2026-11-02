@@ -1,19 +1,19 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
   <defs>
     <linearGradient id="case" x1="20" y1="8" x2="105" y2="124" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#21374C"/><stop offset="1" stop-color="#102330"/>
+      <stop stop-color="#2C2C2E"/><stop offset="1" stop-color="#0C0C0D"/>
     </linearGradient>
     <linearGradient id="canvas" x1="44" y1="36" x2="98" y2="100" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#8AE8CE"/><stop offset="1" stop-color="#36BCA9"/>
+      <stop stop-color="#75BDFF"/><stop offset="1" stop-color="#1685F5"/>
     </linearGradient>
   </defs>
   <rect x="4" y="4" width="120" height="120" rx="29" fill="url(#case)"/>
-  <rect x="23" y="25" width="65" height="52" rx="10" fill="none" stroke="#69869A" stroke-width="5"/>
-  <path d="M37 34h27" stroke="#9CB1BE" stroke-width="4" stroke-linecap="round"/>
+  <rect x="23" y="25" width="65" height="52" rx="10" fill="none" stroke="#8E8E93" stroke-width="5"/>
+  <path d="M37 34h27" stroke="#C7C7CC" stroke-width="4" stroke-linecap="round"/>
   <path d="M50 41h40l16 16v39a9 9 0 0 1-9 9H50a9 9 0 0 1-9-9V50a9 9 0 0 1 9-9Z" fill="url(#canvas)"/>
-  <path d="M90 41v11a5 5 0 0 0 5 5h11" fill="#D6FFF1"/>
-  <path d="m60 61 24 12-10 5-5 12Z" fill="#102D3A" stroke="#102D3A" stroke-width="3" stroke-linejoin="round"/>
-  <path d="m74 78 9 13" stroke="#102D3A" stroke-width="5" stroke-linecap="round"/>
-  <circle cx="27" cy="94" r="5" fill="#F5BA88"/>
-  <path d="M16 94h-2m24 0h-2" stroke="#F5BA88" stroke-width="3" stroke-linecap="round"/>
+  <path d="M90 41v11a5 5 0 0 0 5 5h11" fill="#F2F2F7"/>
+  <path d="m60 61 24 12-10 5-5 12Z" fill="#111111" stroke="#111111" stroke-width="3" stroke-linejoin="round"/>
+  <path d="m74 78 9 13" stroke="#111111" stroke-width="5" stroke-linecap="round"/>
+  <circle cx="27" cy="94" r="5" fill="#FF9F0A"/>
+  <path d="M16 94h-2m24 0h-2" stroke="#FF9F0A" stroke-width="3" stroke-linecap="round"/>
 </svg>

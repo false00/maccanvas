@@ -1,5 +1,5 @@
-import { LineEdit, CheckBox, ComboBox, ScrollView, Slider, Palette } from "std-widgets.slint";
-import { GlassTheme, GlassPanel, Button } from "glass.slint";
+import { LineEdit, ComboBox, ScrollView, Palette } from "std-widgets.slint";
+import { GlassTheme, GlassPanel, Button, CheckBox, Slider } from "glass.slint";
 
 export struct Machine { name: string, detail: string, saved: bool }
 export struct TrafficBar { download: float, upload: float }
@@ -15,8 +15,8 @@ component Caption inherits Text {
 
 component TrafficPlot inherits Rectangle {
     in property <[TrafficBar]> samples;
-    in property <color> incoming: #1bb69b;
-    in property <color> outgoing: #648be6;
+    in property <color> incoming: GlassTheme.accent;
+    in property <color> outgoing: #8e8e93;
     in property <bool> motion: true;
     background: transparent;
     HorizontalLayout {
@@ -76,6 +76,15 @@ export component App inherits Window {
     in property <bool> connecting: false;
     in property <bool> immersive: false;
     in property <bool> pulse: false;
+    in property <string> app-version;
+    in property <bool> update-checking: false;
+    in property <bool> update-available: false;
+    in property <bool> update-installing: false;
+    in property <bool> update-restart-required: false;
+    in property <bool> update-banner: false;
+    in property <string> update-status: "Checking for updates on launch...";
+    in property <string> update-version;
+    in property <float> update-progress;
     in property <string> status: "Ready to connect";
     in-out property <string> error-text;
     in property <string> desktop-description;
@@ -125,6 +134,9 @@ export component App inherits Window {
     callback keyboard-event(KeyEvent, bool) -> bool;
     callback release-input();
     callback focus-canvas();
+    callback check-updates();
+    callback install-update();
+    callback dismiss-update();
 
     init => {
         Palette.color-scheme = root.dark-theme ? ColorScheme.dark : ColorScheme.light;
@@ -145,18 +157,13 @@ export component App inherits Window {
     changed use-saved => { root.username = ""; root.password = ""; }
     focus-canvas => { remote-focus.focus(); }
 
-    background: root.dark-theme ? #0b1826 : #eaf1f7;
-    property <color> panel: root.dark-theme ? #20364b : #ffffff;
-    property <color> outline: root.dark-theme ? #536a80 : #cbd9e5;
+    background: root.dark-theme ? #000000 : #f2f2f7;
+    property <color> panel: root.dark-theme ? #1c1c1e : #ffffff;
+    property <color> outline: root.dark-theme ? #48484a : #d1d1d6;
     property <color> muted: GlassTheme.muted;
     property <color> ink: GlassTheme.ink;
     property <color> accent: GlassTheme.accent;
-    property <color> selection: root.dark-theme ? #21463f : #e6f4ee;
-
-    if root.glass-enabled && !root.immersive : Image {
-        source: @image-url("../assets/aurora.svg");
-        image-fit: cover; opacity: root.dark-theme ? 0.6 : 1;
-    }
+    property <color> selection: root.dark-theme ? #0a84ff1f : #007aff0c;
     VerticalLayout {
         spacing: root.immersive ? 0px : 12px;
         padding: root.immersive ? 0px : 12px;
@@ -224,7 +231,7 @@ export component App inherits Window {
                                 for machine[index] in root.machines : GlassPanel {
                                     height: 116px;
                                     radius: 14px;
-                                    background: root.selected == index ? root.selection : (root.dark-theme ? #445d7360 : #ffffffb8);
+                                    background: root.selected == index ? root.selection : (root.dark-theme ? #2c2c2e99 : #f2f2f7b3);
                                     border-color: root.selected == index ? root.accent : GlassTheme.edge;
                                     animate background { duration: root.motion-enabled ? 140ms : 0ms; }
                                     VerticalLayout {
@@ -321,6 +328,17 @@ export component App inherits Window {
                             CheckBox { text: "Ctrl shortcuts act as Command"; checked <=> root.ctrl-as-command; toggled => { root.save-preferences(); } }
                             Text { text: "Saved logins always require Windows Hello. Theme follows Windows automatically."; color: root.muted; font-size: 11px; wrap: word-wrap; }
                             Text { text: "Use a VPN for remote access. Standard Mac VNC traffic is not encrypted."; color: root.muted; font-size: 11px; wrap: word-wrap; }
+                            Rectangle { height: 1px; background: root.outline; }
+                            HorizontalLayout {
+                                Text { text: "MacCanvas " + root.app-version; color: root.muted; font-size: 11px; vertical-alignment: center; }
+                                Button {
+                                    text: root.update-checking ? "Checking..." : (root.update-available ? "Update" : "Check updates");
+                                    accessible-label: "Check for updates";
+                                    enabled: !root.update-checking && !root.update-installing && !root.update-restart-required;
+                                    clicked => { root.check-updates(); }
+                                }
+                            }
+                            Text { accessible-label: "Update status: " + root.update-status; text: root.update-status; color: root.muted; font-size: 11px; wrap: word-wrap; }
                         }
                     }
                 }
@@ -328,11 +346,11 @@ export component App inherits Window {
             VerticalLayout {
                 spacing: 10px;
                 if root.error-text != "" : Rectangle {
-                    background: root.dark-theme ? #49272d : #fff0f0;
+                    background: root.dark-theme ? #ff453a19 : #ff3b3010;
                     border-radius: 8px; min-height: 54px;
                     HorizontalLayout {
                         padding: 12px; spacing: 8px;
-                        Text { text: root.error-text; color: root.dark-theme ? #ffd2d2 : #9e2638; wrap: word-wrap; }
+                        Text { text: root.error-text; color: root.dark-theme ? #ff6961 : #b42318; wrap: word-wrap; }
                         Button { text: "Dismiss"; clicked => { root.error-text = ""; } }
                     }
                 }
@@ -342,20 +360,20 @@ export component App inherits Window {
                     border-radius: root.immersive ? 0px : 20px;
                     border-width: root.immersive ? 0px : 1px;
                     border-color: GlassTheme.edge;
-                    background: root.dark-theme ? #0e2030e6 : #18364aec; clip: true;
+                    background: root.connected || root.immersive ? #000000 : (root.dark-theme ? #111111c9 : #ffffffd9); clip: true;
                     if !root.connected : VerticalLayout {
                         alignment: center; padding: 30px; spacing: 14px;
                         Rectangle {
                             height: 92px; background: transparent;
                             Image { source: @image-url("../assets/logo.svg"); width: 92px; height: 92px; x: (parent.width - self.width) / 2; }
                         }
-                        Text { text: root.connecting ? "A moment closer." : "Your Mac, beautifully in view."; color: #e8f5ff; font-size: 27px; font-weight: 600; horizontal-alignment: center; wrap: word-wrap; }
-                        Text { text: root.connecting ? "Verify with Windows Hello if prompted." : "Choose a saved Mac or add a new connection."; color: #a7bdcf; horizontal-alignment: center; wrap: word-wrap; }
+                        Text { text: root.connecting ? "A moment closer." : "Your Mac, beautifully in view."; color: root.ink; font-size: 27px; font-weight: 600; horizontal-alignment: center; wrap: word-wrap; }
+                        Text { text: root.connecting ? "Verify with Windows Hello if prompted." : "Choose a saved Mac or add a new connection."; color: root.muted; horizontal-alignment: center; wrap: word-wrap; }
                         HorizontalLayout {
                             alignment: center;
                             Button { width: 200px; text: "New connection"; primary: true; enabled: !root.connecting; clicked => { root.new-machine(); root.sidebar-open = true; } }
                         }
-                        Text { text: "Sharp scaling. A familiar cursor. Your whole desktop."; color: #7993a8; font-size: 12px; horizontal-alignment: center; wrap: word-wrap; }
+                        Text { text: "Sharp scaling. A familiar cursor. Your whole desktop."; color: root.muted; font-size: 12px; horizontal-alignment: center; wrap: word-wrap; }
                     }
                     if root.connected : Image {
                         x: root.draw-left * 1px; y: root.draw-top * 1px;
@@ -363,7 +381,7 @@ export component App inherits Window {
                         source: root.frame-image; image-fit: fill;
                     }
                     remote-focus := FocusScope {
-                        enabled: root.connected && !root.quality-open && !root.help-open;
+                        enabled: root.connected && !root.quality-open && !root.help-open && !root.update-installing;
                         key-pressed(event) => { return root.keyboard-event(event, true) ? EventResult.accept : EventResult.reject; }
                         key-released(event) => { return root.keyboard-event(event, false) ? EventResult.accept : EventResult.reject; }
                         changed has-focus => { if !self.has-focus { root.release-input(); } }
@@ -378,10 +396,10 @@ export component App inherits Window {
                     }
                     if root.immersive : Rectangle {
                         x: 12px; y: 12px; width: 310px; height: 40px;
-                        border-radius: 10px; background: #1a2836e8;
+                        border-radius: 10px; background: #1c1c1ee8;
                         HorizontalLayout {
                             padding: 10px; spacing: 10px;
-                            Text { text: root.download-rate + " in"; color: #80e2c6; font-size: 12px; vertical-alignment: center; }
+                            Text { text: root.download-rate + " in"; color: #64aaff; font-size: 12px; vertical-alignment: center; }
                             TrafficPlot { width: 78px; samples: root.traffic; motion: root.motion-enabled; }
                             if root.show-fps : Text { text: root.fps-text; color: #ffffff; font-size: 12px; vertical-alignment: center; }
                         }
@@ -408,7 +426,7 @@ export component App inherits Window {
                     Rectangle {
                         accessible-role: text; accessible-label: "Connection status indicator";
                         width: 8px; height: 8px; x: 2px; y: (parent.height - self.height) / 2;
-                        border-radius: 4px; background: root.connected ? #19a78d : (root.connecting ? #d1a153 : #8ba0b0);
+                        border-radius: 4px; background: root.connected ? #30d158 : (root.connecting ? #ff9f0a : #8e8e93);
                         opacity: root.connecting && root.pulse ? 0.4 : 1;
                         animate opacity { duration: root.motion-enabled ? 500ms : 0ms; }
                     }
@@ -425,7 +443,7 @@ export component App inherits Window {
         }
     }
     if root.quality-open || root.help-open : Rectangle {
-        background: root.dark-theme ? #06101b82 : #43556c60;
+        background: root.dark-theme ? #00000099 : #00000033;
         TouchArea { clicked => { root.quality-open = false; root.help-open = false; } }
         GlassPanel {
             x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
@@ -438,7 +456,7 @@ export component App inherits Window {
                     Text { text: root.help-open ? "Compression, explained" : "Picture & connection"; color: root.ink; font-size: 22px; font-weight: 600; }
                     Button { text: "Close"; clicked => { root.help-open = false; root.quality-open = false; } }
                 }
-                if root.error-text != "" : Text { text: root.error-text; color: root.dark-theme ? #ffd2d2 : #9e2638; wrap: word-wrap; font-size: 12px; }
+                if root.error-text != "" : Text { text: root.error-text; color: root.dark-theme ? #ff6961 : #b42318; wrap: word-wrap; font-size: 12px; }
                 ScrollView {
                     if !root.help-open : VerticalLayout {
                         spacing: 12px; padding-right: 8px;
@@ -495,6 +513,53 @@ export component App inherits Window {
                     if !root.help-open : Button { text: "Apply"; primary: true; clicked => { root.apply-streaming(); } }
                 }
             }
+        }
+    }
+    if root.update-banner && !root.update-installing : GlassPanel {
+        x: max(16px, root.width - self.width - 20px);
+        y: root.immersive ? 60px : 88px;
+        width: min(390px, root.width - 32px); height: 166px; radius: 18px; raised: true;
+        accessible-role: groupbox; accessible-label: "MacCanvas update notification";
+        TouchArea { }
+        VerticalLayout {
+            padding: 18px; spacing: 10px;
+            Text { text: root.update-restart-required ? "Restart required" : (root.update-available ? "MacCanvas " + root.update-version + " is ready" : "Update check"); color: root.ink; font-size: 16px; font-weight: 600; }
+            Text {
+                text: root.update-available && (root.connected || root.connecting) ? "Disconnect when you're ready to install and restart. Your saved Macs and logins will stay." : root.update-status;
+                color: root.muted; wrap: word-wrap; font-size: 12px;
+            }
+            HorizontalLayout {
+                Button { text: "Later"; clicked => { root.dismiss-update(); } }
+                Rectangle { background: transparent; horizontal-stretch: 1; }
+                Button {
+                    text: root.update-restart-required ? "Restart needed" : (root.update-available ? "Update & restart" : "Retry");
+                    primary: true; enabled: !root.update-checking && !root.connected && !root.connecting && !root.update-restart-required;
+                    clicked => { if root.update-available { root.install-update(); } else { root.check-updates(); } }
+                }
+            }
+        }
+    }
+    if root.update-installing : Rectangle {
+        background: #00000066;
+        TouchArea { }
+        GlassPanel {
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            width: min(460px, parent.width - 48px); height: 180px; radius: 22px; raised: true;
+            VerticalLayout {
+                padding: 24px; spacing: 16px;
+                Text { text: "Updating MacCanvas"; color: root.ink; font-size: 21px; font-weight: 600; }
+                Text { text: root.update-status; color: root.muted; wrap: word-wrap; font-size: 13px; }
+                Rectangle {
+                    height: 5px; border-radius: 3px; background: root.outline;
+                    Rectangle { width: parent.width * root.update-progress; background: root.accent; border-radius: 3px; }
+                }
+                Text { text: "Keep this window open. MacCanvas will restart when ready."; color: root.muted; font-size: 11px; wrap: word-wrap; }
+            }
+        }
+        FocusScope {
+            init => { self.focus(); }
+            key-pressed(event) => { return accept; }
+            key-released(event) => { return accept; }
         }
     }
 }

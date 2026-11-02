@@ -7,7 +7,10 @@
 A lightweight Windows viewer for macOS Screen Sharing.
 One portable executable. No extra DLLs, server, or subscription.
 
-![MacCanvas showing saved Macs and the connection workspace](docs/images/connections.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/connections-dark.png">
+  <img alt="MacCanvas showing saved Macs and the connection workspace" src="docs/images/connections-light.png">
+</picture>
 
 *The app follows the Windows theme. Screenshot uses demonstration machines.*
 
@@ -20,7 +23,8 @@ One portable executable. No extra DLLs, server, or subscription.
 - **Live statistics:** animated download/upload history, automatic kbps/Mbps units, and an optional FPS counter.
 - **Quality controls:** compression, JPEG quality, maximum update rate, and a manual bandwidth target, with an in-app comparison guide.
 - **Familiar controls:** mouse, keyboard, scrolling, full screen, and optional Ctrl-to-Command shortcuts.
-- **Glass-inspired appearance:** translucent panels and soft depth, following Windows theme, transparency, and reduced-motion preferences.
+- **Glass-inspired appearance:** black/charcoal in dark mode, Apple-style whites and grays in light mode, and system-blue controls. Follows Windows appearance preferences.
+- **Easy updates:** checks the official release on launch and prompts before a verified, one-click update and restart.
 
 ## Install
 
@@ -33,6 +37,12 @@ irm https://raw.githubusercontent.com/false00/maccanvas/main/install.ps1 | iex
 Run the same command to update. The installer verifies SHA-256 digests and creates
 a Start-menu shortcut. Prefer portable? Download `MacCanvas-windows-x64.exe`
 from [Releases](https://github.com/false00/maccanvas/releases/latest) and run it.
+
+When a newer version is available, choose **Update & restart** or **Later**.
+Disconnect first if a Mac session is active. The app verifies the download and
+updates its own executable without changing saved Macs or credentials.
+Its folder must be writable. **Check updates** in the sidebar retries the check;
+the installer command remains available for manual updates.
 
 **Unsigned application:** only run downloads and remote scripts you trust.
 [Read the installer](install.ps1) first. Checksums do not establish publisher trust
@@ -102,7 +112,7 @@ cargo build --release --locked
 ```
 
 The pinned toolchain builds `target\x86_64-pc-windows-msvc\release\maccanvas.exe`.
-Rust + Slint Fluent, software rendering, static Microsoft C runtime.
+Rust + Slint, software rendering, static Microsoft C runtime.
 Windows releases are built and tested in GitHub Actions.
 
 An independent project inspired by [TigerVNC](https://tigervnc.org/).

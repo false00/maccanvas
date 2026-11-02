@@ -28,6 +28,7 @@ use maccanvas::{
     streaming::{Encoding, StreamSettings, encoding_name, raw_estimate},
     telemetry::{self, Monitor},
     theme,
+    updates::{self, Updater},
 };
 
 use crate::{App, CodecGuide, Machine, TrafficBar};
@@ -54,6 +55,7 @@ struct State {
     frame_number: u64,
     last_displayed_frame: u64,
     theme_checked: Instant,
+    updater: Updater,
 }
 
 impl State {
@@ -346,6 +348,15 @@ fn stream_form(app: &App, settings: StreamSettings) {
 }
 
 fn read_stream_form(app: &App) -> Result<StreamSettings> {
+    if !app.get_compression_level().is_finite()
+        || !app.get_jpeg_quality().is_finite()
+        || !(0.0..=9.0).contains(&app.get_compression_level())
+        || !(0.0..=9.0).contains(&app.get_jpeg_quality())
+    {
+        return Err(Error::Configuration(
+            "Compression and JPEG quality must be between 0 and 9".into(),
+        ));
+    }
     let target_kbps = if app.get_manual_bandwidth() {
         let value = app.get_target_mbps().parse::<f64>().map_err(|_| {
             Error::Configuration("Enter a bandwidth target in Mbps, for example 10 or 0.5".into())
@@ -438,6 +449,99 @@ fn window_handle(app: &App) -> Result<isize> {
     }
 }
 
+fn tick_updates(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
+    loop {
+        let event = state.borrow().updater.event()?;
+        let Some(event) = event else { break };
+        let mut state = state.borrow_mut();
+        match event {
+            updates::Event::Checked(result) => {
+                state.updater.checking = false;
+                app.set_update_checking(false);
+                match result {
+                    Ok(Some(release)) => {
+                        app.set_update_available(true);
+                        app.set_update_version(release.version.to_string().into());
+                        app.set_update_status("A new version is available. The download will be verified before installation. Saved Macs and logins stay.".into());
+                        app.set_update_banner(true);
+                        state.updater.release = Some(release);
+                    }
+                    Ok(None) => {
+                        state.updater.release = None;
+                        app.set_update_available(false);
+                        app.set_update_banner(false);
+                        app.set_update_status(
+                            format!("You're up to date ({}).", maccanvas::VERSION).into(),
+                        );
+                    }
+                    Err(error) => {
+                        app.set_update_status(
+                            format!("Could not check for updates. {error}").into(),
+                        );
+                        app.set_update_banner(true);
+                    }
+                }
+            }
+            updates::Event::Installed(result) => {
+                state.updater.installing = false;
+                app.set_update_installing(false);
+                match result {
+                    Ok(executable) => {
+                        let directory = state.path.parent().ok_or_else(|| {
+                            Error::Configuration("Settings directory is unavailable".into())
+                        })?;
+                        match std::process::Command::new(executable)
+                            .arg("--data-dir")
+                            .arg(directory)
+                            .spawn()
+                        {
+                            Ok(_) => slint::quit_event_loop()
+                                .map_err(|error| Error::Update(error.to_string()))?,
+                            Err(error) => {
+                                app.set_update_available(false);
+                                state.updater.restart_required = true;
+                                app.set_update_restart_required(true);
+                                app.set_update_status(format!("The new version is installed, but could not restart: {error}. Close and reopen MacCanvas.").into());
+                                app.set_update_banner(true);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        if matches!(&error, Error::UpdateRecovery(_)) {
+                            state.updater.restart_required = true;
+                            app.set_update_restart_required(true);
+                        }
+                        app.set_update_status(
+                            format!("Could not finish the update. {error}").into(),
+                        );
+                        app.set_update_banner(true);
+                    }
+                }
+            }
+        }
+    }
+    let state = state.borrow();
+    if state.updater.installing {
+        let size = state
+            .updater
+            .release
+            .as_ref()
+            .map_or(1, |release| release.size.max(1));
+        let received = state.updater.progress.load(Ordering::Relaxed);
+        let fraction = (received as f64 / size as f64).min(1.0);
+        app.set_update_progress(fraction as f32);
+        app.set_update_status(
+            if received < size {
+                format!("Downloading {:.0}%...", fraction * 100.0)
+            } else {
+                "Verifying and replacing the executable...".into()
+            }
+            .into(),
+        );
+    }
+    Ok(())
+}
+
 fn keysym(text: &str, control: bool) -> Option<u32> {
     use slint::platform::Key;
     let special = [
@@ -489,7 +593,11 @@ fn keysym(text: &str, control: bool) -> Option<u32> {
     Some(input::character_keysym(character))
 }
 
-pub fn run(data_directory: Option<PathBuf>) -> Result<()> {
+pub fn run(
+    data_directory: Option<PathBuf>,
+    preview_theme: Option<bool>,
+    preview_update: bool,
+) -> Result<()> {
     let directory = match data_directory {
         Some(directory) => directory,
         None => dirs::data_local_dir()
@@ -501,13 +609,28 @@ pub fn run(data_directory: Option<PathBuf>) -> Result<()> {
     let path = directory.join("settings.json");
     let settings = Settings::load(&path)?;
     let app = App::new().map_err(|error| Error::Display(error.to_string()))?;
-    app.set_dark_theme(theme::system_dark()?);
+    app.set_dark_theme(match preview_theme {
+        Some(dark) => dark,
+        None => theme::system_dark()?,
+    });
     app.set_motion_enabled(theme::motion_enabled()?);
     app.set_glass_enabled(theme::glass_enabled()?);
     app.set_ctrl_as_command(settings.ctrl_as_command);
     app.set_sidebar_open(settings.sidebar_open || settings.profiles.is_empty());
     app.set_show_fps(settings.show_fps);
     app.set_editor_open(settings.profiles.is_empty());
+    app.set_app_version(maccanvas::VERSION.into());
+    let mut updater = Updater::new();
+    #[cfg(debug_assertions)]
+    if preview_update {
+        updater.preview_available()?;
+    }
+    if preview_theme.is_none() && !(cfg!(debug_assertions) && preview_update) {
+        updater.check();
+    } else {
+        app.set_update_status("Checks for updates on every launch.".into());
+    }
+    app.set_update_checking(updater.checking);
     app.set_traffic(ModelRc::from(Rc::new(VecModel::from(
         vec![TrafficBar::default(); telemetry::HISTORY],
     ))));
@@ -537,6 +660,7 @@ pub fn run(data_directory: Option<PathBuf>) -> Result<()> {
         frame_number: 0,
         last_displayed_frame: 0,
         theme_checked: Instant::now(),
+        updater,
     }));
     model(&app, &state.borrow());
     let weak = app.as_weak();
@@ -545,6 +669,11 @@ pub fn run(data_directory: Option<PathBuf>) -> Result<()> {
         let Some(app) = weak.upgrade() else { return };
         let result = (|| -> Result<()> {
             let mut state = connection_state.borrow_mut();
+            if state.updater.installing {
+                return Err(Error::Update(
+                    "Finish the application update before connecting".into(),
+                ));
+            }
             if state.session.is_some() {
                 return Err(Error::Protocol("A connection is already active".into()));
             }
@@ -589,6 +718,59 @@ pub fn run(data_directory: Option<PathBuf>) -> Result<()> {
                 app.set_status("Verifying and connecting...".into());
             }
             Err(error) => notify(&app, error),
+        }
+    });
+    let weak = app.as_weak();
+    let check_state = state.clone();
+    app.on_check_updates(move || {
+        let Some(app) = weak.upgrade() else { return };
+        let mut state = check_state.borrow_mut();
+        if state.updater.release.is_some() && !state.updater.checking && !state.updater.installing {
+            app.set_update_banner(true);
+            return;
+        }
+        state.updater.check();
+        app.set_update_checking(state.updater.checking);
+        app.set_update_status("Checking the latest official release...".into());
+    });
+    let weak = app.as_weak();
+    let update_state = state.clone();
+    app.on_install_update(move || {
+        let Some(app) = weak.upgrade() else { return };
+        let result = (|| -> Result<()> {
+            let mut state = update_state.borrow_mut();
+            if state.session.is_some() {
+                return Err(Error::Update(
+                    "Disconnect from the Mac before updating and restarting".into(),
+                ));
+            }
+            state.settings.save(&state.path)?;
+            state.updater.install()
+        })();
+        match result {
+            Ok(()) => {
+                app.set_update_installing(true);
+                app.set_update_progress(0.0);
+                app.set_update_status("Starting the verified download...".into());
+            }
+            Err(error) => {
+                app.set_update_status(error.to_string().into());
+                app.set_update_banner(true);
+            }
+        }
+    });
+    let weak = app.as_weak();
+    app.on_dismiss_update(move || {
+        if let Some(app) = weak.upgrade() {
+            app.set_update_banner(false);
+        }
+    });
+    let close_state = state.clone();
+    app.window().on_close_requested(move || {
+        if close_state.borrow().updater.installing {
+            slint::CloseRequestResponse::KeepWindowShown
+        } else {
+            slint::CloseRequestResponse::HideWindow
         }
     });
     let weak = app.as_weak();
@@ -934,6 +1116,10 @@ pub fn run(data_directory: Option<PathBuf>) -> Result<()> {
         Duration::from_millis(16),
         move || {
             let Some(app) = weak.upgrade() else { return };
+            if let Err(error) = tick_updates(&app, &timer_state) {
+                app.set_update_status(error.to_string().into());
+                app.set_update_banner(true);
+            }
             for (generation, event) in receiver.try_iter() {
                 if generation != timer_state.borrow().generation {
                     continue;
@@ -1036,7 +1222,10 @@ pub fn run(data_directory: Option<PathBuf>) -> Result<()> {
                 let mut state = timer_state.borrow_mut();
                 let now = Instant::now();
                 if now.saturating_duration_since(state.theme_checked) >= Duration::from_secs(1) {
-                    app.set_dark_theme(theme::system_dark()?);
+                    app.set_dark_theme(match preview_theme {
+                        Some(dark) => dark,
+                        None => theme::system_dark()?,
+                    });
                     app.set_motion_enabled(theme::motion_enabled()?);
                     app.set_glass_enabled(theme::glass_enabled()?);
                     state.theme_checked = now;

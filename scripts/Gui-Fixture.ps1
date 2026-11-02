@@ -41,6 +41,8 @@ switch ($Action) {
             GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
     }
     'manual-quality' {
+        $slider = Find-FixtureElement 'Compression effort' ([Windows.Automation.ControlType]::Slider)
+        $slider.GetCurrentPattern([Windows.Automation.RangeValuePattern]::Pattern).SetValue(3)
         $toggle = Find-FixtureElement 'Use a manual bandwidth target' ([Windows.Automation.ControlType]::CheckBox)
         $toggle.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern).Toggle()
         Start-Sleep -Milliseconds 150
