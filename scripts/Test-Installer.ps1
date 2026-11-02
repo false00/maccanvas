@@ -79,6 +79,9 @@ try {
     Set-Fixture 'v0.1.0' 1
     $first = Install-MacCanvas -Version latest -InstallDirectory $managed -NoLaunch -NoShortcut
     Assert-Test ((Get-FileHash -LiteralPath $first.Executable).Hash -ieq $script:hash) 'install matching release bytes'
+    $fileSystem = New-Object -ComObject Scripting.FileSystemObject
+    Assert-Test (Test-MacCanvasSamePath $first.Executable ($fileSystem.GetFile($first.Executable).ShortPath)) 'recognize an installed executable through its DOS short-path alias'
+    Assert-Test (-not (Test-MacCanvasSamePath '\\maccanvas-invalid.example\share\MacCanvas.exe' $first.Executable)) 'reject unrelated network targets without accessing them'
     Assert-Test (@((Read-MacCanvasReceipt $managed).PSObject.Properties.Name) -notcontains 'shortcuts') 'pinned older releases retain their compatible receipt schema'
     Assert-Test (@($shortcutPaths | Where-Object { Test-Path -LiteralPath $_ }).Count -eq 0) 'NoShortcut creates neither Start menu nor Desktop links'
     $again = Install-MacCanvas -Version v0.1.0 -InstallDirectory $managed -NoLaunch -NoShortcut
@@ -112,8 +115,10 @@ try {
     foreach ($path in $shortcutPaths) {
         Assert-Test (Test-Path -LiteralPath $path -PathType Leaf) "create native shortcut: $path"
         $link = $shell.CreateShortcut($path)
-        Assert-Test ($link.TargetPath -ieq $installed.Executable -and $link.WorkingDirectory -ieq $managed -and
-            $link.IconLocation -ieq "$($installed.Executable),0" -and $link.Arguments -ceq '') 'shortcut has current executable, working directory, icon, and no arguments'
+        Assert-Test ((Test-MacCanvasSamePath $link.TargetPath $installed.Executable) -and
+            (Test-MacCanvasSamePath $link.WorkingDirectory $managed) -and $link.IconLocation.EndsWith(',0') -and
+            (Test-MacCanvasSamePath ($link.IconLocation -replace ',0$', '') $installed.Executable) -and
+            $link.Arguments -ceq '') 'shortcut has current executable, working directory, icon, and no arguments'
     }
     [IO.File]::Delete($shortcutPaths[1])
     $stale = $shell.CreateShortcut($shortcutPaths[0])
@@ -124,7 +129,9 @@ try {
     $null = Install-MacCanvas -Version latest -InstallDirectory $managed -NoLaunch
     Assert-Test (Test-Path -LiteralPath $shortcutPaths[1] -PathType Leaf) 'installer update restores missing Desktop shortcut'
     $repaired = $shell.CreateShortcut($shortcutPaths[0])
-    Assert-Test ($repaired.WorkingDirectory -ieq $managed -and $repaired.IconLocation -ieq "$($installed.Executable),0" -and
+    Assert-Test ((Test-MacCanvasSamePath $repaired.WorkingDirectory $managed) -and
+        $repaired.IconLocation.EndsWith(',0') -and
+        (Test-MacCanvasSamePath ($repaired.IconLocation -replace ',0$', '') $installed.Executable) -and
         $repaired.Arguments -ceq '') 'installer update refreshes stale shortcut metadata'
     Uninstall-MacCanvas -InstallDirectory $managed
     Assert-Test (@($shortcutPaths | Where-Object { Test-Path -LiteralPath $_ }).Count -eq 0) 'uninstall removes both app-owned shortcuts'

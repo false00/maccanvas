@@ -3,7 +3,7 @@ use std::{
     fs,
     marker::PhantomData,
     os::windows::ffi::OsStringExt,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf, Prefix},
     rc::Rc,
 };
 
@@ -63,7 +63,7 @@ impl Links {
     pub(super) fn owns_any(&self, executable: &Path, paths: &[PathBuf]) -> Result<bool> {
         for path in paths {
             if let Some(link) = load(path)?
-                && same_path(&target(&link)?, executable)
+                && same_path(&target(&link)?, executable)?
             {
                 return Ok(true);
             }
@@ -79,7 +79,7 @@ impl Links {
         for path in paths {
             let link = load(path)?;
             if let Some(link) = &link
-                && !same_path(&target(link)?, executable)
+                && !same_path(&target(link)?, executable)?
             {
                 return Err(failed(format!(
                     "Existing MacCanvas shortcut points elsewhere; it was not overwritten: {}",
@@ -153,10 +153,35 @@ fn target(link: &IShellLinkW) -> Result<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn same_path(left: &Path, right: &Path) -> bool {
-    left.as_os_str()
-        .as_encoded_bytes()
-        .eq_ignore_ascii_case(right.as_os_str().as_encoded_bytes())
+fn same_path(left: &Path, right: &Path) -> Result<bool> {
+    let equal = |left: &Path, right: &Path| {
+        left.as_os_str()
+            .as_encoded_bytes()
+            .eq_ignore_ascii_case(right.as_os_str().as_encoded_bytes())
+    };
+    if equal(left, right) {
+        return Ok(true);
+    }
+    let drive = |path: &Path| match path.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::Disk(disk) | Prefix::VerbatimDisk(disk) => Some(disk.to_ascii_uppercase()),
+            _ => None,
+        },
+        _ => None,
+    };
+    if drive(left).is_none() || drive(left) != drive(right) {
+        return Ok(false);
+    }
+    // Shell links expand DOS 8.3 aliases and may omit the verbatim path prefix.
+    let canonical = |path| match fs::canonicalize(path) {
+        Ok(path) => Ok(Some(path)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(crate::error::Error::from(error)),
+    };
+    Ok(match (canonical(left)?, canonical(right)?) {
+        (Some(left), Some(right)) => equal(&left, &right),
+        _ => false,
+    })
 }
 
 fn current(link: &IShellLinkW, executable: &Path, directory: &Path) -> Result<bool> {
@@ -165,10 +190,10 @@ fn current(link: &IShellLinkW, executable: &Path, directory: &Path) -> Result<bo
     let description = text(|buffer| unsafe { link.GetDescription(buffer) })?;
     let mut index = -1;
     let icon = text(|buffer| unsafe { link.GetIconLocation(buffer, &mut index) })?;
-    Ok(same_path(Path::new(&working), directory)
+    Ok(same_path(Path::new(&working), directory)?
         && arguments.is_empty()
         && description == DESCRIPTION
-        && same_path(Path::new(&icon), executable)
+        && same_path(Path::new(&icon), executable)?
         && index == 0)
 }
 
@@ -181,6 +206,15 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let executable = root.path().join("MacCanvas \u{00e9}.exe");
         fs::write(&executable, b"not executed").unwrap();
+        assert!(same_path(&executable, &fs::canonicalize(&executable).unwrap()).unwrap());
+        assert!(!same_path(&root.path().join("missing.exe"), &executable).unwrap());
+        assert!(
+            !same_path(
+                Path::new("\\\\maccanvas-invalid.example\\share\\MacCanvas.exe"),
+                &executable
+            )
+            .unwrap()
+        );
         let paths = [
             root.path().join("Start menu").join("MacCanvas.lnk"),
             root.path().join("Desktop \u{00e9}").join("MacCanvas.lnk"),
@@ -189,7 +223,7 @@ mod tests {
         assert_eq!(links.repair(&executable, &paths).unwrap(), 2);
         for path in &paths {
             let link = load(path).unwrap().unwrap();
-            assert!(same_path(&target(&link).unwrap(), &executable));
+            assert!(same_path(&target(&link).unwrap(), &executable).unwrap());
             assert!(current(&link, &executable, root.path()).unwrap());
         }
         let before = fs::read(&paths[0]).unwrap();

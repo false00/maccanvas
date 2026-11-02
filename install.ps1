@@ -155,12 +155,27 @@ param(
         }
     }
 
+    function Test-MacCanvasSamePath([string]$Left, [string]$Right) {
+        if ($Left -ieq $Right) { return $true }
+        if ($Left -notmatch '^[A-Za-z]:\\' -or $Right -notmatch '^[A-Za-z]:\\' -or
+            $Left.Substring(0, 2) -ine $Right.Substring(0, 2)) { return $false }
+        # The shell expands DOS 8.3 aliases when loading shortcuts.
+        $fileSystem = New-Object -ComObject Scripting.FileSystemObject
+        if ((Test-Path -LiteralPath $Left -PathType Leaf) -and (Test-Path -LiteralPath $Right -PathType Leaf)) {
+            return $fileSystem.GetFile($Left).ShortPath -ieq $fileSystem.GetFile($Right).ShortPath
+        }
+        if ((Test-Path -LiteralPath $Left -PathType Container) -and (Test-Path -LiteralPath $Right -PathType Container)) {
+            return $fileSystem.GetFolder($Left).ShortPath -ieq $fileSystem.GetFolder($Right).ShortPath
+        }
+        return $false
+    }
+
     function Set-MacCanvasShortcuts([string]$Executable) {
         $paths = @(Get-MacCanvasShortcutPaths)
         $shell = New-Object -ComObject WScript.Shell
         foreach ($path in $paths) {
             if (Test-Path -LiteralPath $path) {
-                if ($shell.CreateShortcut($path).TargetPath -ine $Executable) {
+                if (-not (Test-MacCanvasSamePath ($shell.CreateShortcut($path).TargetPath) $Executable)) {
                     throw "Existing MacCanvas shortcut points elsewhere; it was not overwritten: $path"
                 }
             }
@@ -181,7 +196,7 @@ param(
         $shell = New-Object -ComObject WScript.Shell
         foreach ($path in @(Get-MacCanvasShortcutPaths)) {
             if (Test-Path -LiteralPath $path) {
-                if ($shell.CreateShortcut($path).TargetPath -ieq $Executable) { [IO.File]::Delete($path) }
+                if (Test-MacCanvasSamePath ($shell.CreateShortcut($path).TargetPath) $Executable) { [IO.File]::Delete($path) }
             }
         }
     }
