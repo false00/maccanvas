@@ -97,7 +97,8 @@ machine inside the app first. A portable copy can simply be deleted.
 
 ## Build
 
-Install stable Rust **1.92+** and Visual Studio C++ Build Tools, then:
+Install Rust with rustup and Visual Studio C++ Build Tools. The repository
+selects its tested Rust toolchain automatically:
 
 ```powershell
 cargo test --locked

@@ -121,7 +121,7 @@ pub fn mac_login(stream: &mut (impl Read + Write), credentials: &Credentials) ->
     // Apple ARD mandates this legacy construction; it is not a storage cipher.
     let cipher = aes::Aes128::new_from_slice(&key[..])
         .map_err(|_| Error::Authentication("Invalid Apple authentication key".into()))?;
-    for block in packet.chunks_exact_mut(16) {
+    for block in packet.as_chunks_mut::<16>().0 {
         cipher.encrypt_block(block.into());
     }
     let public = BoxedMontyForm::new(generator, &parameters)
@@ -144,7 +144,7 @@ pub fn vnc_password(stream: &mut (impl Read + Write), credentials: &Credentials)
     stream.read_exact(&mut *challenge)?;
     let cipher = des::Des::new_from_slice(&key[..])
         .map_err(|_| Error::Authentication("Invalid VNC authentication key".into()))?;
-    for block in challenge.chunks_exact_mut(8) {
+    for block in challenge.as_chunks_mut::<8>().0 {
         cipher.encrypt_block(block.into());
     }
     stream.write_all(&challenge[..])?;

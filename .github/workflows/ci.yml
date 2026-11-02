@@ -12,14 +12,12 @@ jobs:
   check:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - name: Set up stable Rust
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Set up the tested Rust toolchain
         shell: pwsh
         run: |
-          rustup update stable --no-self-update
+          rustup show
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          rustup default stable
-          rustup component add rustfmt clippy
       - name: Validate Rust and installer
         shell: pwsh
         run: |

@@ -12,7 +12,7 @@ pub struct Framebuffer {
 impl Framebuffer {
     pub fn new(size: Extent) -> Self {
         let mut rgba = vec![0; size.bytes()];
-        for pixel in rgba.chunks_exact_mut(4) {
+        for pixel in rgba.as_chunks_mut::<4>().0 {
             pixel[3] = 255;
         }
         Self { size, rgba }
@@ -33,7 +33,10 @@ impl Framebuffer {
         rect.validate(self.size)?;
         for y in rect.y..rect.y + rect.height {
             let start = (y as usize * self.size.width as usize + rect.x as usize) * 4;
-            for pixel in self.rgba[start..start + rect.width as usize * 4].chunks_exact_mut(4) {
+            for pixel in self.rgba[start..start + rect.width as usize * 4]
+                .as_chunks_mut::<4>()
+                .0
+            {
                 pixel.copy_from_slice(&color);
             }
         }
@@ -49,8 +52,10 @@ impl Framebuffer {
             let destination =
                 ((rect.y as usize + y) * self.size.width as usize + rect.x as usize) * 4;
             for (input, output) in row
-                .chunks_exact(4)
-                .zip(self.rgba[destination..].chunks_exact_mut(4))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(self.rgba[destination..].as_chunks_mut::<4>().0)
             {
                 output.copy_from_slice(&[input[2], input[1], input[0], 255]);
             }

@@ -60,7 +60,7 @@ fn server_authenticate(stream: &mut TcpStream) {
         .retrieve();
     let key = Md5::digest(shared.to_be_bytes());
     let cipher = aes::Aes128::new_from_slice(&key).unwrap();
-    for block in encrypted.chunks_exact_mut(16) {
+    for block in encrypted.as_chunks_mut::<16>().0 {
         cipher.decrypt_block(block.into());
     }
     assert_eq!(
