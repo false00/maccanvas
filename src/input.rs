@@ -1,17 +1,19 @@
 use std::io::Write;
 
-use crate::{error::Result, geometry::Extent};
+use crate::{error::Result, geometry::Extent, streaming::StreamSettings};
 
 #[derive(Clone, Copy, Debug)]
 pub enum Command {
     Pointer { x: u16, y: u16, buttons: u8 },
     Key { keysym: u32, down: bool },
     Refresh { size: Extent, incremental: bool },
+    Configure(StreamSettings),
 }
 
 impl Command {
     pub fn write(self, writer: &mut impl Write) -> Result<()> {
         match self {
+            Self::Configure(settings) => return settings.write_encodings(writer),
             Self::Pointer { x, y, buttons } => {
                 writer.write_all(&[5, buttons])?;
                 writer.write_all(&x.to_be_bytes())?;

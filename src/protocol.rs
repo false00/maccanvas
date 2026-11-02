@@ -7,6 +7,8 @@ use std::{
 
 use flate2::{Decompress, FlushDecompress, Status};
 
+mod compression;
+
 use crate::{
     auth::{self, Credentials},
     error::{Error, Result},
@@ -14,10 +16,10 @@ use crate::{
     geometry::{Extent, Rect},
     input::Command,
     profiles::{AuthMode, Profile},
+    streaming::StreamSettings,
 };
 
 pub const PIXEL_FORMAT: [u8; 16] = [32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 16, 8, 0, 0, 0, 0];
-const ENCODINGS: [i32; 9] = [16, 5, 1, 0, -223, -308, -239, -240, -224];
 const MAX_COMPRESSED: usize = 64 * 1024 * 1024;
 
 pub struct ServerInfo {
@@ -104,6 +106,16 @@ pub fn handshake(
     mode: AuthMode,
     credentials: &Credentials,
 ) -> Result<ServerInfo> {
+    handshake_with_settings(stream, mode, credentials, StreamSettings::default())
+}
+
+pub fn handshake_with_settings(
+    stream: &mut (impl Read + Write),
+    mode: AuthMode,
+    credentials: &Credentials,
+    settings: StreamSettings,
+) -> Result<ServerInfo> {
+    settings.validate()?;
     credentials.validate(mode)?;
     let mut version = [0; 12];
     stream.read_exact(&mut version)?;
@@ -185,11 +197,7 @@ pub fn handshake(
     let name = String::from_utf8_lossy(&bounded_bytes(stream, name_length, 4096)?).into_owned();
     stream.write_all(&[0, 0, 0, 0])?;
     stream.write_all(&PIXEL_FORMAT)?;
-    stream.write_all(&[2, 0])?;
-    stream.write_all(&(ENCODINGS.len() as u16).to_be_bytes())?;
-    for encoding in ENCODINGS {
-        stream.write_all(&encoding.to_be_bytes())?;
-    }
+    settings.write_encodings(stream)?;
     Command::Refresh {
         size,
         incremental: false,
@@ -206,6 +214,8 @@ pub enum Message {
 pub struct Decoder {
     pub frame: Framebuffer,
     zrle: Decompress,
+    compression: compression::CompressionDecoder,
+    pub last_encoding: Option<i32>,
 }
 
 impl Decoder {
@@ -213,6 +223,8 @@ impl Decoder {
         Self {
             frame: Framebuffer::new(size),
             zrle: Decompress::new(true),
+            compression: compression::CompressionDecoder::new(),
+            last_encoding: None,
         }
     }
 
@@ -256,6 +268,9 @@ impl Decoder {
                 height: u32::from(u16_be(reader)?),
             };
             let encoding = u32_be(reader)? as i32;
+            if matches!(encoding, 0 | 1 | 2 | 4 | 5 | 6 | 7 | 16) {
+                self.last_encoding = Some(encoding);
+            }
             match encoding {
                 -224 => break,
                 -223 => {
@@ -330,6 +345,11 @@ impl Decoder {
                 16 => {
                     rect.validate(self.frame.size)?;
                     self.zrle(reader, rect)?;
+                    changed = true;
+                }
+                2 | 4 | 6 | 7 => {
+                    self.compression
+                        .decode(reader, rect, &mut self.frame, encoding)?;
                     changed = true;
                 }
                 _ => {

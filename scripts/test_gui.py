@@ -147,8 +147,11 @@ class Fixture:
         self.port = self.listener.getsockname()[1]
         self.stop = threading.Event()
         self.authenticated = threading.Event()
+        self.pause_updates = threading.Event()
         self.pointers = []
         self.keys = []
+        self.offers = []
+        self.updates = 0
         self.error = None
 
     def run(self):
@@ -184,7 +187,7 @@ class Fixture:
                         assert read(connection, 19)[3:] == FORMAT
                     elif kind == 2:
                         count = struct.unpack("!H", read(connection, 3)[1:])[0]
-                        read(connection, count * 4)
+                        self.offers.append(struct.unpack(f"!{count}i", read(connection, count * 4)))
                     elif kind == 3:
                         read(connection, 9)
                         if not sent:
@@ -194,6 +197,18 @@ class Fixture:
                                 + ((b"\xff\0\0\0" * 1920 + b"\xff\xff\xff\0" * 1920) * 1080)
                             )
                             sent = True
+                        else:
+                            while self.pause_updates.is_set() and not self.stop.is_set():
+                                time.sleep(0.05)
+                            if self.stop.is_set():
+                                break
+                            time.sleep(0.04)
+                            color = b"\x20\x60\xa0\0" if self.updates % 2 else b"\x50\xa0\x20\0"
+                            connection.sendall(
+                                b"\0\0\0\x01" + struct.pack("!HHHHi", 0, 0, 64, 64, 0)
+                                + color * 64 * 64
+                            )
+                        self.updates += 1
                     elif kind == 4:
                         payload = read(connection, 7)
                         self.keys.append((payload[0], struct.unpack("!I", payload[3:])[0]))
@@ -231,7 +246,7 @@ def automate(pid, port, action):
         "powershell.exe", "-NoProfile", "-File", str(ROOT / "scripts" / "Gui-Fixture.ps1"),
         "-ProcessId", str(pid), "-Port", str(port), "-Action", action
     ], text=True, timeout=30)
-    return json.loads(output) if action == "bounds" else None
+    return json.loads(output) if action in ("bounds", "telemetry") else None
 
 
 def send_input(event):
@@ -348,6 +363,32 @@ def main(executable, native_messages=False):
                      process, fixture, "key releases")
             print("PASS: real Slint GUI, Apple DH login, 4K Lanczos frame, DPI-aware "
                   + ("native mouse/key message dispatch" if native_messages else "physical mouse/key input"))
+            deadline = time.monotonic() + 10
+            while True:
+                samples = automate(process.pid, fixture.port, "telemetry")
+                values = [sample["name"] for sample in samples]
+                if any(name.startswith("Live FPS: ") and not name.startswith("Live FPS: 0 ") for name in values):
+                    break
+                assert time.monotonic() < deadline, values
+                time.sleep(0.3)
+            assert any(name.startswith("Live FPS: ") and not name.startswith("Live FPS: 0 ") for name in values), values
+            assert any(name.startswith("Download rate: ") and not name.startswith("Download rate: 0.0 ") for name in values), values
+            indicator = next(sample for sample in samples if sample["name"] == "Connection status indicator")
+            status = next(sample for sample in samples if sample["name"].startswith("Connected to "))
+            assert abs((indicator["y"] + indicator["height"] / 2) - (status["y"] + status["height"] / 2)) <= 2, samples
+            print("PASS: live measured traffic/FPS and vertically centered status indicator")
+            automate(process.pid, fixture.port, "toggle-sidebar")
+            time.sleep(0.35)
+            expanded = automate(process.pid, fixture.port, "bounds")
+            assert expanded["width"] > bounds["width"] + 300
+            automate(process.pid, fixture.port, "toggle-sidebar")
+            time.sleep(0.35)
+            print("PASS: animated sidebar collapse and restoration")
+            automate(process.pid, fixture.port, "quality")
+            time.sleep(0.2)
+            automate(process.pid, fixture.port, "manual-quality")
+            wait(lambda: len(fixture.offers) >= 2, process, fixture, "live encoding configuration")
+            print("PASS: manual bandwidth target and FPS controls apply without reconnecting")
             if not user32.SetWindowPos(window, None, 0, 0, 1500, 950, 0x16):
                 raise ctypes.WinError(ctypes.get_last_error())
             time.sleep(0.5)
@@ -365,8 +406,22 @@ def main(executable, native_messages=False):
             assert fullscreen["width"] > resized["width"]
             automate(process.pid, fixture.port, "exit-fullscreen")
             print("PASS: resize redraw and immersive full-screen round trip")
+            fixture.pause_updates.set()
+            deadline = time.monotonic() + 10
+            while True:
+                idle = automate(process.pid, fixture.port, "telemetry")
+                names = [entry["name"] for entry in idle]
+                if "Live FPS: 0 FPS" in names and "Download rate: 0.0 kbps" in names:
+                    break
+                assert time.monotonic() < deadline, names
+                time.sleep(0.3)
+            print("PASS: idle traffic and FPS return to zero without counting layout redraws")
             settings = (Path(data) / "settings.json").read_text()
             assert "fixture-password" not in settings and "fixture-user" not in settings
+            configuration = json.loads(settings)
+            assert configuration["streaming"]["target_kbps"] == 1000
+            assert configuration["streaming"]["max_fps"] == 15
+            assert "dark_theme" not in configuration and "hello_for_all_connections" not in configuration
             print("PASS: profiles contain neither username nor password")
         finally:
             user32.SetPhysicalCursorPos(original.x, original.y)

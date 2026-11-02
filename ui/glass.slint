@@ -1,0 +1,113 @@
+export global GlassTheme {
+    in-out property <bool> dark: false;
+    in-out property <bool> motion: true;
+    in-out property <bool> effects: true;
+    out property <color> ink: dark ? #edf5fc : #183348;
+    out property <color> muted: dark ? #a3b8c9 : #526b80;
+    out property <color> accent: dark ? #80e9cd : #08796f;
+    out property <color> edge: dark ? #e0f3ff37 : #ffffffba;
+}
+
+export component GlassPanel inherits Rectangle {
+    in property <length> radius: 20px;
+    in property <bool> raised: false;
+    border-radius: radius;
+    border-width: 1px;
+    border-color: GlassTheme.effects ? GlassTheme.edge : (GlassTheme.dark ? #425669 : #cbd9e4);
+    background: !GlassTheme.effects ? (GlassTheme.dark ? #1c2b3b : #ffffff)
+        : (GlassTheme.dark ? #1c3043dd : #f6fbffdd);
+    drop-shadow-offset-y: raised ? 10px : 6px;
+    drop-shadow-blur: GlassTheme.effects ? (raised ? 24px : 14px) : 0px;
+    drop-shadow-color: GlassTheme.dark ? #020c1826 : #18314c15;
+    if GlassTheme.effects : Rectangle {
+        x: root.radius / 2; y: 1px; width: max(0px, root.width - root.radius);
+        height: 1px; background: GlassTheme.dark ? #ffffff22 : #ffffffe0;
+    }
+    @children
+}
+
+export component Button inherits Rectangle {
+    in property <string> text;
+    in property <image> icon;
+    in property <bool> primary: false;
+    in property <bool> quiet: false;
+    in property <bool> enabled: true;
+    callback clicked();
+    property <bool> key-down: false;
+    property <bool> pressed: pointer.pressed || key-down;
+    property <color> foreground: root.primary
+        ? (GlassTheme.dark ? #0a332b : #ffffff) : GlassTheme.ink;
+    min-width: max(36px, content.min-width);
+    min-height: 34px;
+    preferred-height: 36px;
+    max-height: 40px;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    forward-focus: keyboard;
+    border-radius: 12px;
+    clip: true;
+    border-width: 1px;
+    border-color: root.primary ? (GlassTheme.dark ? #b7ffe9 : #469d92)
+        : (root.quiet ? transparent : GlassTheme.edge);
+    background: root.primary ? (GlassTheme.dark ? #63d8bb : #08796f)
+        : (root.quiet ? transparent : (GlassTheme.dark ? #38566e80 : #f5faffd9));
+    opacity: root.enabled ? 1 : 0.4;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+
+    if !root.quiet && GlassTheme.effects : Rectangle {
+        x: root.border-radius / 2; y: 1px; width: root.width - root.border-radius;
+        height: 1px; background: root.primary ? #ffffff45 : #ffffff25;
+    }
+    Rectangle {
+        border-radius: root.border-radius;
+        background: GlassTheme.dark ? #ffffff : #416d88;
+        opacity: !root.enabled ? 0 : (root.pressed ? 0.16 : (pointer.has-hover ? 0.07 : 0));
+        animate opacity { duration: GlassTheme.motion ? 130ms : 0ms; easing: ease-out; }
+    }
+    content := HorizontalLayout {
+        alignment: center; padding-left: 13px; padding-right: 13px; spacing: 7px;
+        if root.icon.width > 0 : Image {
+            source: root.icon; width: 18px; height: 18px;
+            y: (parent.height - self.height) / 2;
+            colorize: root.foreground; accessible-role: none;
+        }
+        if root.text != "" : Text {
+            text: root.text; color: root.foreground;
+            font-size: 13px; font-weight: root.primary ? 600 : 500;
+            horizontal-alignment: center; vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+    pointer := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { keyboard.focus(); if root.enabled { root.clicked(); } }
+    }
+    keyboard := FocusScope {
+        x: 0px; width: 0px; enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.Space { root.key-down = true; return accept; }
+            if event.text == Key.Return {
+                if !event.repeat && root.enabled { root.clicked(); }
+                return accept;
+            }
+            return reject;
+        }
+        key-released(event) => {
+            if event.text == Key.Space {
+                if root.key-down && root.enabled { root.key-down = false; root.clicked(); }
+                return accept;
+            }
+            return reject;
+        }
+        changed has-focus => { if !self.has-focus { root.key-down = false; } }
+    }
+    if keyboard.has-focus && root.enabled : Rectangle {
+        x: 2px; y: 2px; width: root.width - 4px; height: root.height - 4px;
+        border-radius: root.border-radius - 2px; background: transparent;
+        border-width: 2px; border-color: GlassTheme.accent;
+    }
+}

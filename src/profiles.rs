@@ -3,7 +3,10 @@ use std::{collections::HashSet, fs, io::Write, path::Path};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::error::{Error, Result};
+use crate::{
+    error::{Error, Result},
+    streaming::StreamSettings,
+};
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -55,8 +58,20 @@ pub struct Settings {
     pub version: u32,
     pub profiles: Vec<Profile>,
     pub ctrl_as_command: bool,
-    pub hello_for_all_connections: bool,
-    pub dark_theme: bool,
+    #[serde(default, rename = "hello_for_all_connections", skip_serializing)]
+    pub legacy_hello_for_all: Option<bool>,
+    #[serde(default, rename = "dark_theme", skip_serializing)]
+    pub legacy_dark_theme: Option<bool>,
+    #[serde(default = "enabled")]
+    pub sidebar_open: bool,
+    #[serde(default = "enabled")]
+    pub show_fps: bool,
+    #[serde(default)]
+    pub streaming: StreamSettings,
+}
+
+fn enabled() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -65,14 +80,18 @@ impl Default for Settings {
             version: 1,
             profiles: Vec::new(),
             ctrl_as_command: true,
-            hello_for_all_connections: false,
-            dark_theme: false,
+            legacy_hello_for_all: None,
+            legacy_dark_theme: None,
+            sidebar_open: true,
+            show_fps: true,
+            streaming: StreamSettings::default(),
         }
     }
 }
 
 impl Settings {
     pub fn validate(&self) -> Result<()> {
+        self.streaming.validate()?;
         if self.version != 1 || self.profiles.len() > 128 {
             return Err(Error::Configuration(
                 "Unsupported settings version or too many machines".into(),
@@ -155,9 +174,9 @@ mod tests {
         let path = directory.path().join("settings.json");
         let mut settings = Settings::default();
         settings.save(&path).unwrap();
-        settings.dark_theme = true;
+        settings.show_fps = false;
         settings.save(&path).unwrap();
-        assert!(Settings::load(&path).unwrap().dark_theme);
+        assert!(!Settings::load(&path).unwrap().show_fps);
     }
 
     #[test]
@@ -171,5 +190,17 @@ mod tests {
             has_saved_credentials: false,
         };
         assert!(profile.validate().is_err());
+    }
+
+    #[test]
+    fn migrates_old_theme_and_hello_preferences_without_saving_toggles() {
+        let json = r#"{"version":1,"profiles":[],"ctrl_as_command":true,"hello_for_all_connections":false,"dark_theme":true}"#;
+        let settings: Settings = serde_json::from_str(json).unwrap();
+        settings.validate().unwrap();
+        let saved = serde_json::to_string(&settings).unwrap();
+        assert!(!saved.contains("hello_for_all"));
+        assert!(!saved.contains("dark_theme"));
+        assert_eq!(settings.streaming, StreamSettings::default());
+        assert!(settings.show_fps);
     }
 }

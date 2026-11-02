@@ -22,12 +22,14 @@ pub struct Job {
     pub viewport: Viewport,
     pub generation: u64,
     pub ticket: u64,
+    pub frame_number: u64,
 }
 
 pub struct Rendered {
     pub viewport: Viewport,
     pub generation: u64,
     pub ticket: u64,
+    pub frame_number: u64,
     pub rgba: Vec<u8>,
 }
 
@@ -114,6 +116,7 @@ impl Renderer {
                     viewport: job.viewport,
                     generation: job.generation,
                     ticket: job.ticket,
+                    frame_number: job.frame_number,
                     rgba,
                 });
                 match outgoing.lock() {
@@ -210,6 +213,7 @@ mod tests {
             frame: Arc::new(frame),
             generation: 1,
             ticket: 1,
+            frame_number: 1,
         };
         let output = scale(&mut Resizer::new(), &job).unwrap();
         assert_eq!(output.len(), 2560 * 1440 * 4);
@@ -233,6 +237,7 @@ mod tests {
                     viewport: Viewport::fit(frame.size, 32.0, 32.0, 1.0).unwrap(),
                     generation: 1,
                     ticket,
+                    frame_number: 1,
                 })
                 .unwrap();
         }

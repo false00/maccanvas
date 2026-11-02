@@ -1,104 +1,99 @@
+<img src="assets/logo.svg" align="right" width="72" alt="MacCanvas screen-and-canvas logo">
+
 # MacCanvas
 
 **Your Mac. Your Windows screen.**
 
-A small, portable Windows VNC viewer built for macOS Screen Sharing.
-One executable. No server, browser, subscription, or extra runtime.
+A lightweight Windows viewer for macOS Screen Sharing.
+One portable executable. No extra DLLs, server, or subscription.
 
-## What it does
+![MacCanvas showing saved Macs and the connection workspace](docs/images/connections.png)
 
-- Connect with your **Mac username and password**, or a separately configured VNC password.
-- Fit a 4K Mac desktop onto a smaller screen with **Lanczos scaling**, without changing the Mac's resolution.
-- Keep your **normal Windows cursor**, including its accessibility size. It never shrinks with the remote desktop.
-- Send mouse, keyboard, and scroll input. Windows **Ctrl shortcuts map to Command** by default.
-- Save machine addresses locally. Store passwords **only in Windows Credential Manager**.
-- Require **Windows Hello before reading a saved login**. You can also require Hello for every connection.
-- Use a lightweight **Slint Fluent interface**, with light/dark themes and software rendering.
+*The app follows the Windows theme. Screenshot uses demonstration machines.*
+
+## Features
+
+- **Sharp scaling:** fit a 4K desktop to your screen without changing the Mac's resolution.
+- **Visible cursor:** keep your normal Windows pointer and accessibility size.
+- **Easy connections:** searchable Mac list, quick connect, and an animated, collapsible sidebar.
+- **Protected logins:** Windows Credential Manager storage; **Windows Hello is mandatory for every saved login**. Saved passwords cannot be displayed.
+- **Live statistics:** animated download/upload history, automatic kbps/Mbps units, and an optional FPS counter.
+- **Quality controls:** compression, JPEG quality, maximum update rate, and a manual bandwidth target, with an in-app comparison guide.
+- **Familiar controls:** mouse, keyboard, scrolling, full screen, and optional Ctrl-to-Command shortcuts.
+- **Glass-inspired appearance:** translucent panels and soft depth, following Windows theme, transparency, and reduced-motion preferences.
 
 ## Install
 
-Windows 10/11 **x64**, PowerShell 5.1 or newer. Run as your normal user:
+**Windows 10/11 x64**, PowerShell 5.1+. Run as your normal user:
 
 ```powershell
 irm https://raw.githubusercontent.com/false00/maccanvas/main/install.ps1 | iex
 ```
 
-The installer checks release SHA-256 digests, verifies the x64 executable,
-and creates a Start-menu shortcut. Updates use the same command.
-Nothing requires administrator access.
+Run the same command to update. The installer verifies SHA-256 digests and creates
+a Start-menu shortcut. Prefer portable? Download `MacCanvas-windows-x64.exe`
+from [Releases](https://github.com/false00/maccanvas/releases/latest) and run it.
 
-**Prefer portable?** Download `MacCanvas-windows-x64.exe` from
-[Releases](https://github.com/false00/maccanvas/releases/latest) and run it.
-No DLL folder or installation is required.
+**Unsigned application:** only run downloads and remote scripts you trust.
+[Read the installer](install.ps1) first. Checksums do not establish publisher trust
+or bypass Windows application-control policies.
 
-**The executable is unsigned.** Only run it if you trust this repository.
-[Read the installer](install.ps1) first. Checksums check the download, not the
-publisher's trustworthiness. MacCanvas does not bypass SmartScreen or managed
-Windows application-control policies.
+## Connect
 
-## Connect to your Mac
+1. On the Mac, enable **System Settings → General → Sharing → Screen Sharing**
+   and allow your macOS account.
+2. Select **New connection**. Enter the Mac's name, IP/VPN address, and port `5900`.
+3. Choose **Mac account** and enter its username/password. Select **Connect to Mac**.
+4. To reconnect with Hello, enable **Save login in Credential Manager**.
+   Credentials are saved only after a successful login.
 
-1. On the Mac, open **System Settings → General → Sharing → Screen Sharing**.
-2. Enable it and allow your macOS account access.
-3. In MacCanvas, enter the Mac's IP address or VPN address. Leave port `5900`.
-4. Choose **Mac account**, enter its username/password, and select **Connect to Mac**.
-5. To remember it, select **Remember in Credential Manager** before connecting.
-   The password is saved only after a successful login.
+**VNC password** is for the separate password configured in Screen Sharing,
+not the Mac account password. If necessary, use your macOS short username.
 
-Use the Mac account's short username if its display name does not work.
-**VNC password** mode is only for the separate password configured in the Mac's
-Screen Sharing settings; it is not your macOS account password.
+Use a VPN for internet access. **Never expose port 5900 publicly.** Standard
+Mac VNC screen and input traffic is not encrypted, even with Mac account login.
 
-For internet access, use a VPN such as Tailscale. **Do not expose port 5900
-directly to the internet.** macOS account authentication protects the login
-exchange, but standard VNC screen, keyboard, and mouse traffic is **not encrypted**.
-MacCanvas does not claim TLS protection or verify a Mac's identity.
+## Quality and statistics
 
-## Saved logins and Windows Hello
+Open **Quality** before or during a connection. Defaults are **Auto lossless,
+compression 6, no bandwidth target, and a 60-update/s maximum**.
 
-Passwords are never written to profile files, logs, command lines, or environment
-variables. Each machine has a separate Credential Manager entry. Select a saved
-machine and approve the Windows Hello prompt to reconnect.
+Supported methods: **ZRLE, Tight, Tight + JPEG, Hextile, Zlib, RRE, CoRRE, Raw**,
+plus CopyRect. The in-app guide explains CPU cost, image quality, and illustrative
+bandwidth ranges. The Mac can choose a fallback or ignore compression hints.
+Proprietary Apple high-performance codecs and H.264 are not supported.
 
-If Hello is unavailable or cancelled, **the saved password is not read and the
-connection does not open**. You can uncheck **Use saved login** and enter credentials
-manually, unless **Hello before every connection** is enabled.
+A bandwidth target paces screen requests; **it is not a guaranteed bitrate cap**.
+Bursts can exceed it. Keyboard and mouse input are not throttled.
+Traffic measures RFB bytes, excluding TCP/VPN overhead. FPS counts unique desktop
+images submitted for display, not monitor refreshes; idle screens can read 0 FPS.
 
-Hello is an approval gate in this app, not an additional vault encryption boundary.
-Other programs running as your Windows user may access that user's generic
-Credential Manager entries. Use a protected Windows account and screen lock.
+## Saved-login privacy
 
-Deleting a machine in the app removes its saved credential. Changing an address
-with a saved login requires a new machine entry, so a saved password cannot
-accidentally be sent to a different endpoint.
+Passwords never enter profile files or a saved-password display field.
+Every [saved-login attempt](docs/images/saved-login.png) requires a fresh Hello approval. If Hello is unavailable
+or cancelled, the app neither reads the saved password nor opens the connection.
+You may instead enter credentials manually; this does not unlock the saved login.
 
-## Controls
-
-- Scaling adjusts automatically when you resize or enter full screen.
-- Click inside the remote desktop before typing.
-- **Ctrl+C / Ctrl+V / Ctrl+S** become the Mac's Command shortcuts by default.
-  Turn off **Ctrl shortcuts act as Command** to send normal Control.
-- **Alt** acts as Option. Windows/Meta acts as Command when delivered by Windows.
-- System-reserved shortcuts such as Alt+Tab remain local.
-- Clipboard synchronization, audio, file transfer, VNC hosting, and remote display
-  resolution changes are intentionally not included.
+Delete a Mac in the app to remove its saved credential. Saved logins are tied to
+their original address. Hello is an app approval gate, not extra vault encryption:
+other software running as your Windows user may access generic Windows credentials.
 
 ## Remove
 
-Close MacCanvas, then run:
+Close MacCanvas, then:
 
 ```powershell
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/false00/maccanvas/main/install.ps1))) -Uninstall
 ```
 
-Only the managed executable, receipt, and matching Start-menu shortcut are removed.
-Profiles and saved credentials are preserved. To remove a saved login, delete its
-machine inside the app first. A portable copy can simply be deleted.
+The managed application and shortcut are removed. Profiles and credentials are
+preserved; delete saved Macs in the app first to remove their logins.
+For a portable copy, delete the executable.
 
-## Build
+## Build and credits
 
-Install Rust with rustup and Visual Studio C++ Build Tools. The repository
-selects its tested Rust toolchain automatically:
+Install rustup and Visual Studio C++ Build Tools, then:
 
 ```powershell
 cargo test --locked
@@ -106,23 +101,14 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo build --release --locked
 ```
 
-The executable is `target\x86_64-pc-windows-msvc\release\maccanvas.exe`.
-It statically links the Microsoft C runtime. Slint uses the software renderer;
-Qt, WebView2, Skia, and external runtime DLLs are not required.
+The pinned toolchain builds `target\x86_64-pc-windows-msvc\release\maccanvas.exe`.
+Rust + Slint Fluent, software rendering, static Microsoft C runtime.
+Windows releases are built and tested in GitHub Actions.
 
-The release workflow tests the app and installer, builds the executable, checks
-its Windows imports, and publishes versioned assets and `SHA256SUMS.txt`.
+An independent project inspired by [TigerVNC](https://tigervnc.org/).
+Credit to the TigerVNC team, RealVNC, TightVNC, and the original VNC authors.
+No TigerVNC C++ code is embedded. The original logo depicts a remote screen
+becoming a local canvas.
 
-## Credits and license
-
-MacCanvas is an independent Rust project inspired by
-[TigerVNC](https://tigervnc.org/). Credit to the TigerVNC team, RealVNC,
-TightVNC, and the original VNC authors for their work on remote desktop clients
-and the RFB ecosystem. macOS Screen Sharing implements Apple's ARD authentication.
-
-The implementation uses the RFB/ARD protocol documentation and Rust libraries;
-it does not embed TigerVNC's C++ viewer. See
-[THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt) and **`--licenses`** for
-dependency acknowledgements.
-
-Licensed under **GPL-3.0-or-later**, including compatibility with Slint's GPL option.
+**GPL-3.0-or-later.** Dependency credits: [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt)
+or `--licenses`.

@@ -10,3 +10,6 @@ pub mod profiles;
 pub mod protocol;
 pub mod render;
 pub mod session;
+pub mod streaming;
+pub mod telemetry;
+pub mod theme;

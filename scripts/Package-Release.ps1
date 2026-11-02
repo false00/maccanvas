@@ -3,7 +3,8 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$Version,
-    [string]$Executable = ''
+    [string]$Executable = '',
+    [string]$OutputDirectory = 'dist'
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -34,7 +35,7 @@ foreach ($dll in $imports) {
         throw "Release is not self-contained; external runtime import: $dll"
     }
 }
-$dist = Join-Path $root 'dist'
+$dist = if ([IO.Path]::IsPathRooted($OutputDirectory)) { $OutputDirectory } else { Join-Path $root $OutputDirectory }
 if (Test-Path -LiteralPath $dist) { throw 'dist already exists; preserve the previous package and choose a clean build directory.' }
 $null = [IO.Directory]::CreateDirectory($dist)
 $destination = Join-Path $dist 'MacCanvas-windows-x64.exe'

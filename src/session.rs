@@ -6,7 +6,7 @@ use std::{
         mpsc::{self, Receiver, Sender, SyncSender, TrySendError},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::{
@@ -16,6 +16,8 @@ use crate::{
     input::Command,
     profiles::Profile,
     protocol::{self, Decoder, Message},
+    streaming::StreamSettings,
+    telemetry::{Counters, Metered},
 };
 
 pub type Frames = Arc<Mutex<Option<Arc<Framebuffer>>>>;
@@ -33,7 +35,7 @@ pub enum Event {
 pub struct Request {
     pub profile: Profile,
     pub credentials: CredentialSource,
-    pub hello_for_all: bool,
+    pub streaming: StreamSettings,
     pub remember: bool,
     pub window: isize,
     pub generation: u64,
@@ -64,7 +66,16 @@ impl Control {
 
 pub struct Session {
     control: Arc<Control>,
-    sender: SyncSender<Command>,
+    sender: SyncSender<WriterCommand>,
+    pub counters: Arc<Counters>,
+}
+
+enum WriterCommand {
+    Input(Command),
+    Complete {
+        size: crate::geometry::Extent,
+        bytes: u64,
+    },
 }
 
 impl Session {
@@ -74,6 +85,8 @@ impl Session {
             socket: Mutex::new(None),
         });
         let (sender, receiver) = mpsc::sync_channel(256);
+        let counters = Counters::new();
+        let traffic = counters.clone();
         let worker_control = control.clone();
         let refresh = sender.clone();
         thread::spawn(move || {
@@ -85,6 +98,7 @@ impl Session {
                 &events,
                 &frames,
                 &worker_control,
+                traffic,
             );
             if let Err(error) = outcome
                 && !worker_control.cancelled.load(Ordering::Acquire)
@@ -101,11 +115,15 @@ impl Session {
                 eprintln!("MacCanvas connection window has closed");
             }
         });
-        Self { control, sender }
+        Self {
+            control,
+            sender,
+            counters,
+        }
     }
 
     pub fn send(&self, command: Command) -> Result<()> {
-        match self.sender.try_send(command) {
+        match self.sender.try_send(WriterCommand::Input(command)) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => {
                 self.control.close()?;
@@ -134,17 +152,17 @@ impl Drop for Session {
 
 fn run(
     request: Request,
-    incoming: Receiver<Command>,
-    refresh: SyncSender<Command>,
+    incoming: Receiver<WriterCommand>,
+    refresh: SyncSender<WriterCommand>,
     events: &Sender<(u64, Event)>,
     frames: &Frames,
     control: &Arc<Control>,
+    counters: Arc<Counters>,
 ) -> Result<()> {
     let generation = request.generation;
     let credentials = credentials::resolve(
         request.profile.id,
         request.credentials,
-        request.hello_for_all,
         &WindowsHello {
             window: request.window,
         },
@@ -153,7 +171,7 @@ fn run(
     if control.cancelled.load(Ordering::Acquire) {
         return Ok(());
     }
-    let mut stream = protocol::connect(&request.profile)?;
+    let stream = protocol::connect(&request.profile)?;
     *control
         .socket
         .lock()
@@ -162,8 +180,17 @@ fn run(
     if control.cancelled.load(Ordering::Acquire) {
         return Ok(());
     }
-    let info = protocol::handshake(&mut stream, request.profile.authentication, &credentials)?;
-    stream.set_read_timeout(None)?;
+    let mut stream = Metered {
+        inner: stream,
+        counters: counters.clone(),
+    };
+    let info = protocol::handshake_with_settings(
+        &mut stream,
+        request.profile.authentication,
+        &credentials,
+        request.streaming,
+    )?;
+    stream.inner.set_read_timeout(None)?;
     let mut profile = request.profile;
     if request.remember {
         match WindowsVault.save(profile.id, &credentials) {
@@ -184,30 +211,25 @@ fn run(
         }
     }
     drop(credentials);
-    let mut writer = stream.try_clone()?;
+    let writer = stream.inner.try_clone()?;
     writer.set_write_timeout(Some(Duration::from_secs(3)))?;
+    let mut writer = Metered {
+        inner: writer,
+        counters: counters.clone(),
+    };
     let writer_control = control.clone();
     let writer_events = events.clone();
     let writer_thread = thread::spawn(move || {
-        while !writer_control.cancelled.load(Ordering::Acquire) {
-            match incoming.recv_timeout(Duration::from_millis(100)) {
-                Ok(command) => {
-                    if let Err(error) = command.write(&mut writer) {
-                        if !writer_control.cancelled.load(Ordering::Acquire)
-                            && writer_events
-                                .send((generation, Event::Error(error.to_string())))
-                                .is_err()
-                        {
-                            eprintln!("MacCanvas input failed: {error}");
-                        }
-                        if let Err(error) = writer_control.close() {
-                            eprintln!("MacCanvas input shutdown failed: {error}");
-                        }
-                        break;
-                    }
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => (),
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        if let Err(error) = write_loop(&mut writer, incoming, request.streaming, &writer_control) {
+            if !writer_control.cancelled.load(Ordering::Acquire)
+                && writer_events
+                    .send((generation, Event::Error(error.to_string())))
+                    .is_err()
+            {
+                eprintln!("MacCanvas input failed: {error}");
+            }
+            if let Err(error) = writer_control.close() {
+                eprintln!("MacCanvas input shutdown failed: {error}");
             }
         }
     });
@@ -225,8 +247,12 @@ fn run(
         if control.cancelled.load(Ordering::Acquire) {
             break Ok(());
         }
+        let bytes_before = counters.received.load(Ordering::Relaxed);
         match decoder.read_message(&mut stream) {
             Ok(Message::Update { changed }) => {
+                if let Some(encoding) = decoder.last_encoding {
+                    counters.encoding.store(encoding, Ordering::Relaxed);
+                }
                 if changed {
                     let mut latest = match frames.lock() {
                         Ok(latest) => latest,
@@ -235,9 +261,12 @@ fn run(
                     *latest = Some(Arc::new(decoder.frame.clone()));
                 }
                 if refresh
-                    .send(Command::Refresh {
+                    .send(WriterCommand::Complete {
                         size: decoder.frame.size,
-                        incremental: true,
+                        bytes: counters
+                            .received
+                            .load(Ordering::Relaxed)
+                            .saturating_sub(bytes_before),
                     })
                     .is_err()
                 {
@@ -258,4 +287,170 @@ fn run(
         .join()
         .map_err(|_| Error::Protocol("Input worker stopped unexpectedly".into()))?;
     result
+}
+
+fn write_loop(
+    writer: &mut impl std::io::Write,
+    incoming: Receiver<WriterCommand>,
+    mut settings: StreamSettings,
+    control: &Control,
+) -> Result<()> {
+    let mut last_request = Instant::now();
+    let mut pending = None;
+    let mut ignore_in_flight_budget = false;
+    while !control.cancelled.load(Ordering::Acquire) {
+        let delay = pending.map_or(Duration::from_millis(100), |(_, bytes)| {
+            (last_request + settings.request_interval(bytes))
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(100))
+        });
+        if let Some((size, bytes)) = pending
+            && Instant::now() >= last_request + settings.request_interval(bytes)
+        {
+            Command::Refresh {
+                size,
+                incremental: true,
+            }
+            .write(writer)?;
+            last_request = Instant::now();
+            pending = None;
+            continue;
+        }
+        match incoming.recv_timeout(delay) {
+            Ok(WriterCommand::Input(Command::Configure(updated))) => {
+                updated.validate()?;
+                settings = updated;
+                Command::Configure(updated).write(writer)?;
+                // A new target must not charge a frame requested under the old target.
+                if let Some((size, _)) = pending {
+                    pending = Some((size, 0));
+                    ignore_in_flight_budget = false;
+                } else {
+                    ignore_in_flight_budget = true;
+                }
+                last_request = Instant::now();
+            }
+            Ok(WriterCommand::Input(command)) => {
+                command.write(writer)?;
+                if matches!(command, Command::Refresh { .. }) {
+                    last_request = Instant::now();
+                    pending = None;
+                }
+            }
+            Ok(WriterCommand::Complete { size, bytes }) => {
+                let bytes = if std::mem::take(&mut ignore_in_flight_budget) {
+                    0
+                } else {
+                    bytes
+                };
+                pending = Some((size, bytes));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => (),
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    struct Sink {
+        sent: Sender<Vec<u8>>,
+    }
+    impl std::io::Write for Sink {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.sent.send(data.to_vec()).unwrap();
+            Ok(data.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn bandwidth_pacing_never_blocks_pointer_or_key_release() {
+        let (sender, receiver) = mpsc::sync_channel(8);
+        let control = Arc::new(Control {
+            cancelled: AtomicBool::new(false),
+            socket: Mutex::new(None),
+        });
+        let (sent, received) = mpsc::channel();
+        let worker_control = control.clone();
+        let worker = thread::spawn(move || {
+            write_loop(
+                &mut Sink { sent },
+                receiver,
+                StreamSettings {
+                    target_kbps: 100,
+                    ..Default::default()
+                },
+                &worker_control,
+            )
+            .unwrap()
+        });
+        sender
+            .send(WriterCommand::Complete {
+                size: crate::geometry::Extent::new(4, 4).unwrap(),
+                bytes: 1_000_000,
+            })
+            .unwrap();
+        sender
+            .send(WriterCommand::Input(Command::Key {
+                keysym: 0xffe3,
+                down: false,
+            }))
+            .unwrap();
+        assert_eq!(
+            received.recv_timeout(Duration::from_millis(250)).unwrap(),
+            [4, 0, 0, 0]
+        );
+        control.cancelled.store(true, Ordering::Release);
+        drop(sender);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn lowering_a_target_does_not_freeze_updates_for_the_previous_frame() {
+        let (sender, receiver) = mpsc::sync_channel(8);
+        let control = Arc::new(Control {
+            cancelled: AtomicBool::new(false),
+            socket: Mutex::new(None),
+        });
+        let (sent, received) = mpsc::channel();
+        let worker_control = control.clone();
+        let worker = thread::spawn(move || {
+            write_loop(
+                &mut Sink { sent },
+                receiver,
+                StreamSettings::default(),
+                &worker_control,
+            )
+            .unwrap()
+        });
+        sender
+            .send(WriterCommand::Complete {
+                size: crate::geometry::Extent::new(4, 4).unwrap(),
+                bytes: 33_000_000,
+            })
+            .unwrap();
+        sender
+            .send(WriterCommand::Input(Command::Configure(StreamSettings {
+                target_kbps: 100,
+                ..Default::default()
+            })))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let fragment = received
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap();
+            if fragment.first() == Some(&3) {
+                break;
+            }
+        }
+        control.cancelled.store(true, Ordering::Release);
+        drop(sender);
+        worker.join().unwrap();
+    }
 }

@@ -44,15 +44,14 @@ pub enum CredentialSource {
 pub fn resolve(
     profile: Uuid,
     source: CredentialSource,
-    hello_for_all: bool,
     consent: &impl ConsentVerifier,
     store: &impl CredentialStore,
 ) -> Result<Credentials> {
-    if matches!(source, CredentialSource::Saved) || hello_for_all {
-        consent.verify()?;
-    }
     match source {
-        CredentialSource::Saved => store.load(profile),
+        CredentialSource::Saved => {
+            consent.verify()?;
+            store.load(profile)
+        }
         CredentialSource::Manual(credentials) => Ok(credentials),
     }
 }
@@ -256,7 +255,6 @@ mod tests {
         resolve(
             Uuid::new_v4(),
             CredentialSource::Saved,
-            false,
             &Consent(&calls, true),
             &Store(&calls),
         )
@@ -271,7 +269,6 @@ mod tests {
             resolve(
                 Uuid::new_v4(),
                 CredentialSource::Saved,
-                false,
                 &Consent(&calls, false),
                 &Store(&calls)
             )
@@ -281,12 +278,11 @@ mod tests {
     }
 
     #[test]
-    fn manual_credentials_work_without_hello_when_not_required() {
+    fn manual_credentials_do_not_read_the_vault() {
         let calls = RefCell::new(Vec::new());
         resolve(
             Uuid::new_v4(),
             CredentialSource::Manual(Credentials::new("fixture".into(), "fixture".into())),
-            false,
             &Consent(&calls, false),
             &Store(&calls),
         )
@@ -295,18 +291,26 @@ mod tests {
     }
 
     #[test]
-    fn strict_hello_also_gates_manual_connections() {
+    fn every_saved_login_requires_a_fresh_hello_approval() {
         let calls = RefCell::new(Vec::new());
+        let profile = Uuid::new_v4();
+        resolve(
+            profile,
+            CredentialSource::Saved,
+            &Consent(&calls, true),
+            &Store(&calls),
+        )
+        .unwrap();
         assert!(
             resolve(
-                Uuid::new_v4(),
-                CredentialSource::Manual(Credentials::new("fixture".into(), "fixture".into())),
-                true,
+                profile,
+                CredentialSource::Saved,
                 &Consent(&calls, false),
                 &Store(&calls)
             )
             .is_err()
         );
+        assert_eq!(*calls.borrow(), ["hello", "read", "hello"]);
     }
 
     #[test]
