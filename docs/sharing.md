@@ -26,7 +26,7 @@ Extended Clipboard extension. Text is limited to 1 MiB; images, files, rich text
 embedded NULs, and unsupported formats are not transferred.
 
 VNC clipboard and desktop traffic are not encrypted. Use a trusted network or VPN.
-Use **Files** for encrypted Unicode clipboard access when the Mac does not offer
+Use **Clipboard** for encrypted Unicode clipboard access when the Mac does not offer
 the UTF-8 VNC extension.
 
 ## SSH setup and identity
@@ -35,9 +35,14 @@ On the Mac, enable **System Settings > General > Sharing > Remote Login** and
 allow your account. Screen Sharing alone does not provide SSH/SFTP.
 Keep both services behind a VPN rather than exposing ports 5900 or 22 publicly.
 
-Open **Files** in an active screen-sharing session. The host is the connected
+Open **Clipboard** or **Files** in an active screen-sharing session. The host is the connected
 Mac; the default SSH port is 22. Enter the Mac account login or choose its saved
 login. A separate classic VNC password is not an SSH account password.
+
+Both panels share one SSH connection. Clipboard keeps **Copy Mac text** and
+**Send Windows text**, login, and host-key approval in place; it never redirects
+to Files. Files contains the browser and transfer controls. Closing a panel
+keeps an established SSH session open, so switching panels does not reconnect.
 
 Before any password is read from the vault or sent over SSH:
 
@@ -119,7 +124,12 @@ RTF/PostScript-looking text instead of treating it as rich clipboard content.
 No general-purpose remote-command interface is exposed.
 
 Saved passwords remain protected by the same mandatory Hello gate used for VNC.
-Clipboard audit events contain only direction, encoding, byte counts, and outcomes.
+Clipboard audit events contain direction, encoding, byte counts, and outcomes.
+Helper failures also report an allowlisted operation stage, error category and
+numeric code, and whether SSH matches a logged-in console desktop account.
+These distinguish missing plain text from helper errors without assuming a
+macOS permission restriction. Raw helper output and clipboard text are never
+displayed as diagnostics or written to the audit log.
 
 ## Protocol references
 

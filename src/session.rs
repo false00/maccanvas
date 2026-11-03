@@ -271,7 +271,7 @@ impl Session {
     pub fn share_clipboard(&self, enabled: bool) -> Result<()> {
         if enabled && self.uses_hevc() {
             return Err(Error::Clipboard(
-                "Use the encrypted SSH clipboard in Files while using HEVC".into(),
+                "Use the encrypted SSH controls in Clipboard while using HEVC".into(),
             ));
         }
         self.audit.critical(

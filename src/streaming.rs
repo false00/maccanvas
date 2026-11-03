@@ -112,7 +112,7 @@ impl Encoding {
                 "Raw: no pixel compression and the lowest compression CPU cost. Best only on fast trusted links; full-frame 4K motion can require several gigabits per second."
             }
             Self::Hevc30 => {
-                "Apple High Performance HEVC/H.265 at up to 30 FPS. Lower stream and decoding load than 60 FPS; preserves the Mac's physical desktop. Requires Mac account login and UDP on the VNC port and the next port. A native decoder is bundled; no codec extension is needed. Apply reconnects automatically when needed. Use Files for encrypted clipboard."
+                "Apple High Performance HEVC/H.265 at up to 30 FPS. Lower stream and decoding load than 60 FPS; preserves the Mac's physical desktop. Requires Mac account login and UDP on the VNC port and the next port. A native decoder is bundled; no codec extension is needed. Apply reconnects automatically when needed. Use Clipboard for encrypted text sharing."
             }
             Self::Hevc60 => {
                 "Default: Apple High Performance HEVC/H.265 at up to 60 FPS. Smoother motion with higher decoding and bandwidth use. Uses the same physical Mac desktop, encrypted control and SRTP video, with native decoding and software fallback. Requires a compatible Mac, Mac account login and UDP on both media ports. Apply reconnects automatically when needed."

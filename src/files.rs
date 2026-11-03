@@ -42,8 +42,144 @@ const MAX_FILE: u64 = 1024 * 1024 * 1024 * 1024;
 const MAX_ENTRIES: usize = 2048;
 const MAX_PATH: usize = 4096;
 
-const READ_CLIPBOARD: &str = r#"/usr/bin/osascript -l JavaScript -e 'ObjC.import("AppKit"); ObjC.import("Foundation"); var s = $.NSPasteboard.generalPasteboard.stringForType($.NSPasteboardTypeString); if (s.isNil()) { throw Error("No plain text is available"); } $.NSFileHandle.fileHandleWithStandardOutput.writeData(s.dataUsingEncoding($.NSUTF8StringEncoding));'"#;
-const WRITE_CLIPBOARD: &str = r#"/usr/bin/osascript -l JavaScript -e 'ObjC.import("AppKit"); ObjC.import("Foundation"); var d = $.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile; var s = $.NSString.alloc.initWithDataEncoding(d, $.NSUTF8StringEncoding); if (s.isNil()) { throw Error("Invalid UTF-8 input"); } var p = $.NSPasteboard.generalPasteboard; p.clearContents; if (!p.setStringForType(s, $.NSPasteboardTypeString)) { throw Error("Cannot set plain text"); }'"#;
+const READ_CLIPBOARD: &str = r#"/usr/bin/osascript -l JavaScript -e '
+var stage = "load_foundation", reason = null, desktop = null, sameAccount = null;
+try {
+    ObjC.import("Foundation");
+    try {
+        var attributes = $.NSFileManager.defaultManager.attributesOfItemAtPathError("/dev/console", null);
+        var owner = ObjC.unwrap(attributes.objectForKey($.NSFileOwnerAccountName));
+        desktop = !!owner && owner !== "root" && owner !== "loginwindow" && owner !== "_mbsetupuser";
+        sameAccount = desktop ? owner === ObjC.unwrap($.NSUserName()) : null;
+    } catch (ignored) {}
+    stage = "load_appkit"; ObjC.import("AppKit");
+    stage = "open_pasteboard"; var pasteboard = $.NSPasteboard.generalPasteboard;
+    stage = "read_plain_text"; var text = pasteboard.stringForType($.NSPasteboardTypeString);
+    stage = "check_plain_text";
+    if (text.isNil()) { reason = "no_plain_text"; throw Error("No plain text is available"); }
+    stage = "encode_plain_text"; var data = text.dataUsingEncoding($.NSUTF8StringEncoding);
+    stage = "write_output"; $.NSFileHandle.fileHandleWithStandardOutput.writeData(data);
+} catch (error) {
+    if (!reason) {
+        reason = error.name === "TypeError" ? "type_error" : error.name === "ReferenceError" ? "reference_error" : error.name === "SyntaxError" ? "syntax_error" : "helper_exception";
+    }
+    var code = typeof error.errorNumber === "number" ? error.errorNumber : typeof error.number === "number" ? error.number : null;
+    throw Error("MACCANVAS_CLIPBOARD_DIAGNOSTIC=" + JSON.stringify({version:1, stage:stage, reason:reason, error_code:code, desktop_session:desktop, same_desktop_account:sameAccount}));
+}'"#;
+const WRITE_CLIPBOARD: &str = r#"/usr/bin/osascript -l JavaScript -e '
+var stage = "load_foundation", reason = null, desktop = null, sameAccount = null;
+try {
+    ObjC.import("Foundation");
+    try {
+        var attributes = $.NSFileManager.defaultManager.attributesOfItemAtPathError("/dev/console", null);
+        var owner = ObjC.unwrap(attributes.objectForKey($.NSFileOwnerAccountName));
+        desktop = !!owner && owner !== "root" && owner !== "loginwindow" && owner !== "_mbsetupuser";
+        sameAccount = desktop ? owner === ObjC.unwrap($.NSUserName()) : null;
+    } catch (ignored) {}
+    stage = "load_appkit"; ObjC.import("AppKit");
+    stage = "read_input"; var data = $.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile;
+    stage = "decode_input"; var text = $.NSString.alloc.initWithDataEncoding(data, $.NSUTF8StringEncoding);
+    if (text.isNil()) { reason = "invalid_utf8"; throw Error("Invalid UTF-8 input"); }
+    stage = "open_pasteboard"; var pasteboard = $.NSPasteboard.generalPasteboard;
+    stage = "clear_pasteboard"; pasteboard.clearContents;
+    stage = "write_plain_text";
+    if (!pasteboard.setStringForType(text, $.NSPasteboardTypeString)) { reason = "write_rejected"; throw Error("Cannot set plain text"); }
+} catch (error) {
+    if (!reason) {
+        reason = error.name === "TypeError" ? "type_error" : error.name === "ReferenceError" ? "reference_error" : error.name === "SyntaxError" ? "syntax_error" : "helper_exception";
+    }
+    var code = typeof error.errorNumber === "number" ? error.errorNumber : typeof error.number === "number" ? error.number : null;
+    throw Error("MACCANVAS_CLIPBOARD_DIAGNOSTIC=" + JSON.stringify({version:1, stage:stage, reason:reason, error_code:code, desktop_session:desktop, same_desktop_account:sameAccount}));
+}'"#;
+
+#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ClipboardStage {
+    LoadFoundation,
+    LoadAppkit,
+    OpenPasteboard,
+    ReadPlainText,
+    CheckPlainText,
+    EncodePlainText,
+    WriteOutput,
+    ReadInput,
+    DecodeInput,
+    ClearPasteboard,
+    WritePlainText,
+}
+
+#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ClipboardReason {
+    NoPlainText,
+    InvalidUtf8,
+    WriteRejected,
+    TypeError,
+    ReferenceError,
+    SyntaxError,
+    HelperException,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClipboardDiagnostic {
+    version: u8,
+    stage: ClipboardStage,
+    reason: ClipboardReason,
+    error_code: Option<i32>,
+    desktop_session: Option<bool>,
+    same_desktop_account: Option<bool>,
+}
+
+impl ClipboardDiagnostic {
+    fn parse(stderr: &[u8]) -> Option<Self> {
+        std::str::from_utf8(stderr).ok()?.lines().find_map(|line| {
+            let marker = "MACCANVAS_CLIPBOARD_DIAGNOSTIC=";
+            let payload = &line[line.find(marker)? + marker.len()..];
+            let diagnostic = serde_json::Deserializer::from_str(payload)
+                .into_iter::<Self>()
+                .next()?
+                .ok()?;
+            (diagnostic.version == 1).then_some(diagnostic)
+        })
+    }
+
+    fn message(&self) -> String {
+        let detail = match self.reason {
+            ClipboardReason::NoPlainText => {
+                "The Mac clipboard has no plain text. Copy some text on the Mac and retry."
+            }
+            ClipboardReason::InvalidUtf8 => "The Mac clipboard helper rejected its UTF-8 input.",
+            ClipboardReason::WriteRejected => "The Mac pasteboard rejected the text write.",
+            ClipboardReason::TypeError => {
+                "The Mac clipboard helper encountered a JavaScript type error."
+            }
+            ClipboardReason::ReferenceError => {
+                "The Mac clipboard helper could not resolve a JavaScript or AppKit symbol."
+            }
+            ClipboardReason::SyntaxError => {
+                "The Mac clipboard helper encountered a JavaScript syntax error."
+            }
+            ClipboardReason::HelperException => "The Mac clipboard helper raised an exception.",
+        };
+        let account = if self.desktop_session == Some(false) {
+            "No logged-in console desktop was detected."
+        } else {
+            match self.same_desktop_account {
+                Some(true) => "SSH matches the logged-in Mac desktop account.",
+                Some(false) => "SSH does not match the logged-in Mac desktop account.",
+                None => "The desktop account match could not be determined.",
+            }
+        };
+        let code = self
+            .error_code
+            .map_or_else(|| "not reported".into(), |value| value.to_string());
+        format!(
+            "{detail} Stage: {:?}; macOS error: {code}. {account}",
+            self.stage
+        )
+    }
+}
 
 impl From<russh::Error> for Error {
     fn from(error: russh::Error) -> Self {
@@ -1085,7 +1221,7 @@ async fn mac_clipboard(
         channel.eof().await?;
         let mut output = Zeroizing::new(Vec::new());
         let mut status = None;
-        let mut stderr = 0_usize;
+        let mut stderr = Zeroizing::new(Vec::new());
         while let Some(message) = channel.wait().await {
             control.check()?;
             match message {
@@ -1094,8 +1230,8 @@ async fn mac_clipboard(
                     output.extend_from_slice(&data);
                 }
                 ChannelMsg::ExtendedData { data,.. } => {
-                    stderr = stderr.saturating_add(data.len());
-                    if stderr > 4096 { return Err(Error::Transfer("The Mac clipboard helper returned excessive diagnostic output".into())); }
+                    if stderr.len().saturating_add(data.len()) > 4096 { return Err(Error::Transfer("The Mac clipboard helper returned excessive diagnostic output".into())); }
+                    stderr.extend_from_slice(&data);
                 }
                 ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
                 ChannelMsg::ExitSignal { .. } | ChannelMsg::Failure => return Err(Error::Transfer("The Mac denied or stopped its clipboard helper".into())),
@@ -1103,13 +1239,32 @@ async fn mac_clipboard(
                 _ => (),
             }
         }
-        if status != Some(0) { return Err(Error::Transfer(format!("Mac clipboard access failed (exit {status:?}). Use the same account as the Mac's logged-in desktop; macOS may restrict pasteboard access over SSH."))); }
+        if status != Some(0) {
+            let diagnostic = ClipboardDiagnostic::parse(&stderr);
+            scope.critical("ssh.clipboard.failed", Level::Error, json!({
+                "clipboard.direction":if sending { "windows_to_mac" } else { "mac_to_windows" },
+                "clipboard.helper.exit_code":status,
+                "clipboard.helper.diagnostic_bytes":stderr.len(),
+                "clipboard.helper.stage":diagnostic.as_ref().map(|value|value.stage),
+                "clipboard.helper.reason":diagnostic.as_ref().map(|value|value.reason),
+                "clipboard.helper.macos_error":diagnostic.as_ref().and_then(|value|value.error_code),
+                "clipboard.helper.desktop_session":diagnostic.as_ref().and_then(|value|value.desktop_session),
+                "clipboard.helper.same_desktop_account":diagnostic.as_ref().and_then(|value|value.same_desktop_account),
+                "event.outcome":"failure",
+            }))?;
+            let detail = diagnostic.map_or_else(
+                || "No structured diagnostic was returned. Raw output is withheld to protect clipboard contents; this does not establish a macOS permission restriction.".to_owned(),
+                |value|value.message(),
+            );
+            let exit = status.map_or_else(|| "not reported".into(), |value| value.to_string());
+            return Err(Error::Clipboard(format!("Mac clipboard helper failed (exit {exit}). {detail}")));
+        }
         let output = Zeroizing::new(std::str::from_utf8(&output).map_err(|_| Error::Transfer("The Mac clipboard did not return valid UTF-8".into()))?.to_owned());
         clipboard::validate(&output,true)?;
         scope.critical("ssh.clipboard.completed",Level::Info,json!({
             "clipboard.direction":if sending { "windows_to_mac" } else { "mac_to_windows" },
             "clipboard.text_bytes":input.as_ref().map_or(output.len(),|text| text.len()),"clipboard.encoding":"utf8",
-            "clipboard.helper.diagnostic_bytes":stderr,"event.outcome":"success",
+            "clipboard.helper.diagnostic_bytes":stderr.len(),"event.outcome":"success",
         }))?;
         Ok(output)
     }).await.map_err(|_| Error::Transfer("The Mac clipboard helper timed out".into()))?;
@@ -1167,5 +1322,30 @@ mod tests {
         assert!(WRITE_CLIPBOARD.contains("setStringForType"));
         assert!(!WRITE_CLIPBOARD.contains("eval("));
         assert!(!READ_CLIPBOARD.contains("pbpaste"));
+    }
+
+    #[test]
+    fn clipboard_diagnostics_distinguish_empty_text_from_helper_errors() {
+        let no_text = ClipboardDiagnostic::parse(br#"MACCANVAS_CLIPBOARD_DIAGNOSTIC={"version":1,"stage":"check_plain_text","reason":"no_plain_text","error_code":null,"desktop_session":true,"same_desktop_account":true}"#).unwrap();
+        assert!(no_text.message().contains("has no plain text"));
+        assert!(no_text.message().contains("SSH matches"));
+        let type_error = ClipboardDiagnostic::parse(br#"MACCANVAS_CLIPBOARD_DIAGNOSTIC={"version":1,"stage":"check_plain_text","reason":"type_error","error_code":-2700,"desktop_session":true,"same_desktop_account":false}"#).unwrap();
+        assert!(type_error.message().contains("JavaScript type error"));
+        assert!(type_error.message().contains("CheckPlainText"));
+        assert!(type_error.message().contains("-2700"));
+        assert!(type_error.message().contains("SSH does not match"));
+    }
+
+    #[test]
+    fn clipboard_diagnostics_reject_arbitrary_remote_text() {
+        for stderr in [
+            &b"PRIVATE_CLIPBOARD_TEXT"[..],
+            &br#"MACCANVAS_CLIPBOARD_DIAGNOSTIC={"version":1,"stage":"PRIVATE_CLIPBOARD_TEXT","reason":"type_error"}"#[..],
+            &br#"MACCANVAS_CLIPBOARD_DIAGNOSTIC={"version":1,"stage":"check_plain_text","reason":"PRIVATE_CLIPBOARD_TEXT"}"#[..],
+            &br#"MACCANVAS_CLIPBOARD_DIAGNOSTIC={"version":1,"stage":"check_plain_text","reason":"type_error","message":"PRIVATE_CLIPBOARD_TEXT"}"#[..],
+            &br#"MACCANVAS_CLIPBOARD_DIAGNOSTIC={"version":2,"stage":"check_plain_text","reason":"type_error"}"#[..],
+        ] {
+            assert!(ClipboardDiagnostic::parse(stderr).is_none());
+        }
     }
 }

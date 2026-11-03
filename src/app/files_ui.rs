@@ -154,29 +154,74 @@ fn scope(files: &Files) -> Result<&Scope> {
         .ok_or_else(|| Error::Transfer("SSH operation context is unavailable".into()))
 }
 
+fn prepare_ssh(app: &App, state: &mut State) -> Result<()> {
+    if !app.get_connected() {
+        return Err(Error::Transfer("Connect to your Mac's screen first".into()));
+    }
+    state.release()?;
+    if state.files.client.is_none() {
+        let profile = state
+            .connection_profile
+            .clone()
+            .ok_or_else(|| Error::Transfer("The active Mac is unavailable".into()))?;
+        let saved = profile.authentication == AuthMode::MacLogin && profile.has_saved_credentials;
+        app.set_files_host(profile.host.clone().into());
+        app.set_files_has_saved(saved);
+        app.set_files_use_saved(saved);
+        app.set_files_password("".into());
+        app.set_files_username("".into());
+        app.set_files_port("22".into());
+        app.set_files_error("".into());
+        app.set_files_status("SSH is shared by file transfer and clipboard.".into());
+        state.files.profile = Some(profile);
+    }
+    Ok(())
+}
+
 pub(super) fn wire(app: &App, state: Rc<RefCell<State>>) {
     let weak = app.as_weak();
     let open = state.clone();
     app.on_open_files(move || {
-        let Some(app) = weak.upgrade() else { return; };
-        let result = (|| {
+        let Some(app) = weak.upgrade() else {
+            return;
+        };
+        let result: Result<()> = (|| {
             let mut state = open.borrow_mut();
-            if !app.get_connected() { return Err(Error::Transfer("Connect to your Mac's screen first".into())); }
-            state.release()?;
-            if state.files.client.is_none() {
-                let profile = state.connection_profile.clone().ok_or_else(|| Error::Transfer("The active Mac is unavailable".into()))?;
-                let saved = profile.authentication == AuthMode::MacLogin && profile.has_saved_credentials;
-                app.set_files_host(profile.host.clone().into());
-                app.set_files_has_saved(saved); app.set_files_use_saved(saved);
-                app.set_files_password("".into()); app.set_files_username("".into());
-                app.set_files_port("22".into()); app.set_files_error("".into());
-                app.set_files_status("Encrypted file transfer uses SSH, not Apple's proprietary VNC file-sharing extension.".into());
-                state.files.profile = Some(profile);
-            }
+            prepare_ssh(&app, &mut state)?;
+            app.set_clipboard_open(false);
             app.set_files_open(true);
             Ok(())
         })();
-        if let Err(error) = result { fail(&app,error); app.set_files_open(true); }
+        if let Err(error) = result {
+            fail(&app, error);
+            app.set_files_open(true);
+        }
+    });
+
+    let weak = app.as_weak();
+    let clipboard = state.clone();
+    app.on_open_clipboard(move || {
+        let Some(app) = weak.upgrade() else {
+            return;
+        };
+        if let Err(error) = prepare_ssh(&app, &mut clipboard.borrow_mut()) {
+            fail(&app, error);
+        }
+        app.set_files_open(false);
+        app.set_clipboard_open(true);
+    });
+    let weak = app.as_weak();
+    let clipboard_closing = state.clone();
+    app.on_close_clipboard(move || {
+        if let Some(app) = weak.upgrade() {
+            if app.get_files_connecting() || app.get_files_key_pending() {
+                clipboard_closing.borrow_mut().files.stop(&app);
+            }
+            app.set_clipboard_open(false);
+            if app.get_connected() {
+                app.invoke_focus_canvas();
+            }
+        }
     });
 
     let weak = app.as_weak();
@@ -188,7 +233,7 @@ pub(super) fn wire(app: &App, state: Rc<RefCell<State>>) {
             if !app.get_connected() || state.updater.installing { return Err(Error::Transfer("Keep the Mac connection open while using SSH".into())); }
             if state.files.client.is_some() { return Err(Error::Transfer("SSH is already connected or connecting".into())); }
             if state.files.retiring.len() >= 4 { return Err(Error::Transfer("Wait for the previous SSH connection to close".into())); }
-            let profile = state.files.profile.clone().ok_or_else(|| Error::Transfer("Open Files from an active Mac connection".into()))?;
+            let profile = state.files.profile.clone().ok_or_else(|| Error::Transfer("Open Files or Clipboard from an active Mac connection".into()))?;
             let port = app.get_files_port().parse::<u16>().ok().filter(|&port| port != 0)
                 .ok_or_else(|| Error::Transfer("SSH port must be 1-65535".into()))?;
             let credentials = if app.get_files_use_saved() { CredentialSource::Saved } else {
@@ -456,7 +501,9 @@ pub(super) fn tick(app: &App, state: &mut State) -> Result<()> {
                 );
                 state.files.approval = Some((key, reply));
                 app.set_files_key_pending(true);
-                app.set_files_open(true);
+                if !app.get_clipboard_open() {
+                    app.set_files_open(true);
+                }
             }
             Event::Connected => {
                 state.files.directory.clear();

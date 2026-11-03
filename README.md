@@ -135,9 +135,13 @@ when pasting into the Mac; incoming Mac text can replace your Windows clipboard.
 Standard VNC supports Latin-1; Unicode requires a negotiated UTF-8 extension.
 HEVC sessions use the encrypted SSH clipboard instead of VNC clipboard sharing.
 
-For encrypted Unicode copy/paste and file transfer, open **Files** and enable
-**Remote Login** in the Mac's Sharing settings. Verify the SSH fingerprint before
-trusting a new Mac. Saved Mac logins require fresh Windows Hello approval.
+For encrypted Unicode copy/paste, use **Copy Mac text** and **Send Windows text**
+in **Clipboard**. Use **Files** for file transfers. Both panels share one SSH
+connection, including the same login and host-key verification. Closing a panel
+keeps the established SSH connection open.
+
+Enable **Remote Login** in the Mac's Sharing settings. Verify the SSH fingerprint
+before trusting a new Mac. Saved Mac logins require fresh Windows Hello approval.
 
 Send or receive single files without overwriting existing files. Uploads are
 SHA-256 checked by reading them back before the final file is created.

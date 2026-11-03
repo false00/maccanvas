@@ -201,6 +201,8 @@ export component App inherits Window {
     callback open-logs();
     callback clipboard-changed();
     callback paste-windows-text();
+    callback open-clipboard();
+    callback close-clipboard();
     callback open-files();
     callback files-close();
     callback files-connect();
@@ -266,8 +268,8 @@ export component App inherits Window {
                 Rectangle { horizontal-stretch: 1; background: transparent; }
                 Button { text: "Quality"; icon: @image-url("../assets/tune.svg"); accessible-label: "Stream quality"; clicked => { root.quality-open = true; root.release-input(); } }
                 Button { icon: @image-url("../assets/audio.svg"); accessible-label: "Audio playback"; quiet: root.audio-muted; clicked => { root.audio-open = true; root.release-input(); } }
-                Button { icon: @image-url("../assets/clipboard.svg"); accessible-label: "Clipboard sharing"; quiet: true; enabled: root.connected; clicked => { root.clipboard-open = true; root.release-input(); } }
-                Button { text: "Files"; icon: @image-url("../assets/folder.svg"); accessible-label: "Files and SSH clipboard"; quiet: !root.files-connected; enabled: root.connected; clicked => { root.open-files(); } }
+                Button { icon: @image-url("../assets/clipboard.svg"); accessible-label: "Clipboard sharing"; quiet: true; enabled: root.connected; clicked => { root.open-clipboard(); } }
+                Button { text: "Files"; icon: @image-url("../assets/folder.svg"); accessible-label: "File transfer"; quiet: !root.files-connected; enabled: root.connected; clicked => { root.open-files(); } }
                 Button { icon: @image-url("../assets/info.svg"); accessible-label: "About MacCanvas"; quiet: true; clicked => { root.about-open = true; root.release-input(); } }
                 Button { accessible-label: "Refresh"; icon: @image-url("../assets/refresh.svg"); quiet: true; enabled: root.connected; clicked => { root.refresh-desktop(); } }
                 Button { accessible-label: "Full screen"; icon: @image-url("../assets/fullscreen.svg"); quiet: true; enabled: root.connected; clicked => { root.fullscreen-requested(); } }
@@ -643,10 +645,20 @@ export component App inherits Window {
 
     if root.clipboard-open : ClipboardOverlay {
         shared <=> root.clipboard-shared; mode: root.clipboard-mode; vnc-available: !root.hevc-active;
+        host: root.files-host; port <=> root.files-port; username <=> root.files-username; password <=> root.files-password;
+        has-saved: root.files-has-saved; use-saved <=> root.files-use-saved; connected: root.files-connected;
+        connecting: root.files-connecting; busy: root.files-busy; key-pending: root.files-key-pending;
+        fingerprint: root.files-fingerprint; key-algorithm: root.files-key-algorithm; key-command: root.files-key-command;
+        status: root.files-status; error: root.files-error; progress: root.files-progress; progress-label: root.files-progress-label;
         changed => { root.clipboard-changed(); }
-        close => { root.clipboard-open = false; if root.connected { root.focus-canvas(); } }
+        close => { root.close-clipboard(); }
         paste-text => { root.paste-windows-text(); }
-        ssh-files => { root.clipboard-open = false; root.open-files(); }
+        connect => { root.files-connect(); }
+        disconnect => { root.files-disconnect(); }
+        approve(accepted) => { root.files-approve(accepted); }
+        cancel => { root.files-cancel(); }
+        copy-text => { root.files-copy-text(); }
+        send-text => { root.files-send-text(); }
     }
 
     if root.files-open : FilesOverlay {
@@ -666,8 +678,6 @@ export component App inherits Window {
         entry(index) => { root.files-entry(index); }
         upload => { root.files-upload(); }
         cancel => { root.files-cancel(); }
-        copy-text => { root.files-copy-text(); }
-        send-text => { root.files-send-text(); }
     }
 
     if root.update-banner && !root.update-installing && !root.modal-open : GlassPanel {

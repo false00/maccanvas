@@ -59,6 +59,7 @@ fn serve_owned_gui_fixture() {
 struct Evidence {
     files: Mutex<BTreeMap<String, Vec<u8>>>,
     clipboard: Mutex<Vec<u8>>,
+    clipboard_failure: AtomicUsize,
     commands: Mutex<Vec<String>>,
     authentications: AtomicUsize,
     delay_ms: AtomicUsize,
@@ -239,6 +240,38 @@ impl server::Handler for Ssh {
         let mut channel = self.channels.remove(&id).unwrap();
         let data = self.data.clone();
         tokio::spawn(async move {
+            let failure = data.clipboard_failure.load(Ordering::Relaxed);
+            if failure != 0 {
+                let diagnostic = if failure == 3 {
+                    format!("Unstructured diagnostic: {CLIPBOARD}\n")
+                } else {
+                    format!(
+                        "{CLIPBOARD}\nexecution error: Error: MACCANVAS_CLIPBOARD_DIAGNOSTIC={} (-2700)\n",
+                        json!({
+                            "version":1,
+                            "stage":"check_plain_text",
+                            "reason":if failure == 1 { "no_plain_text" } else { "type_error" },
+                            "error_code":if failure == 1 { None } else { Some(-2700) },
+                            "desktop_session":true,
+                            "same_desktop_account":true,
+                        })
+                    )
+                };
+                channel.data(CLIPBOARD.as_bytes()).await.unwrap();
+                let middle = diagnostic.len() / 2;
+                channel
+                    .extended_data(1, &diagnostic.as_bytes()[..middle])
+                    .await
+                    .unwrap();
+                channel
+                    .extended_data(1, &diagnostic.as_bytes()[middle..])
+                    .await
+                    .unwrap();
+                channel.exit_status(1).await.unwrap();
+                channel.eof().await.unwrap();
+                channel.close().await.unwrap();
+                return;
+            }
             if command.contains("fileHandleWithStandardOutput") {
                 let text = data.clipboard.lock().unwrap().clone();
                 channel.data(text.as_slice()).await.unwrap();
@@ -648,6 +681,79 @@ fn verified_ssh_transfers_files_and_unicode_without_logging_contents_or_password
     }
     assert!(log.contains("file.transfer.completed") && log.contains("file.hash.sha256"));
     assert!(maccanvas::audit::verify(&[audit.audit().path()]).unwrap() > 15);
+}
+
+#[test]
+fn clipboard_failures_report_safe_diagnostics_and_keep_ssh_connected() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut audit = Audit::start(directory.path().join("audit")).unwrap();
+    let fixture = Fixture::new();
+    let client = fixture.client(&audit, None, false);
+    connected(&client, &fixture);
+    for (failure, expected) in [
+        (1, "has no plain text"),
+        (2, "JavaScript type error"),
+        (3, "No structured diagnostic"),
+    ] {
+        fixture
+            .evidence
+            .clipboard_failure
+            .store(failure, Ordering::Relaxed);
+        client.command(Command::CopyClipboard).unwrap();
+        wait(&client, |event| match event {
+            Event::Failed(error) => {
+                assert!(error.contains(expected), "{error}");
+                assert!(!error.contains(CLIPBOARD));
+                assert!(!error.contains(PASSWORD));
+                true
+            }
+            Event::Clipboard(_) => panic!("A failed helper must not replace the Windows clipboard"),
+            Event::Closed => panic!("Clipboard failure must not disconnect SSH"),
+            _ => false,
+        });
+    }
+    fixture
+        .evidence
+        .clipboard_failure
+        .store(0, Ordering::Relaxed);
+    client.command(Command::CopyClipboard).unwrap();
+    wait(&client, |event| match event {
+        Event::Clipboard(text) => {
+            assert_eq!(&*text, CLIPBOARD);
+            true
+        }
+        Event::Failed(error) => panic!("Clipboard did not recover: {error}"),
+        _ => false,
+    });
+    client.finish().unwrap();
+    audit.shutdown().unwrap();
+    let log = std::fs::read_to_string(audit.audit().path()).unwrap();
+    assert!(!log.contains(CLIPBOARD));
+    assert!(!log.contains(PASSWORD));
+    let failures = log
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|record| record["event_name"] == "ssh.clipboard.failed")
+        .collect::<Vec<_>>();
+    assert_eq!(failures.len(), 3);
+    assert_eq!(
+        failures[0]["attributes"]["clipboard.helper.reason"],
+        "no_plain_text"
+    );
+    assert_eq!(
+        failures[1]["attributes"]["clipboard.helper.reason"],
+        "type_error"
+    );
+    assert_eq!(
+        failures[1]["attributes"]["clipboard.helper.macos_error"],
+        -2700
+    );
+    assert_eq!(
+        failures[1]["attributes"]["clipboard.helper.same_desktop_account"],
+        true
+    );
+    assert!(failures[2]["attributes"]["clipboard.helper.reason"].is_null());
+    maccanvas::audit::verify(&[audit.audit().path()]).unwrap();
 }
 
 #[test]

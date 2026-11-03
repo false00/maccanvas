@@ -723,7 +723,7 @@ fn tick_reconnect(
 fn paste_windows(app: &App, state: &mut State) -> Result<()> {
     if state.session.as_ref().is_some_and(Session::uses_hevc) {
         return Err(Error::Clipboard(
-            "Use the encrypted SSH clipboard in Files while using HEVC".into(),
+            "Use the encrypted SSH controls in Clipboard while using HEVC".into(),
         ));
     }
     let owner = window_handle(app)?;
@@ -743,7 +743,7 @@ fn tick_clipboard(app: &App, state: &mut State) -> Result<()> {
         return Ok(());
     };
     if session.uses_hevc() {
-        app.set_clipboard_mode("HEVC uses the encrypted SSH clipboard in Files.".into());
+        app.set_clipboard_mode("HEVC uses the encrypted SSH clipboard.".into());
         return Ok(());
     }
     app.set_clipboard_mode(
@@ -1316,7 +1316,9 @@ pub fn run(
                 }
             }
             slint::RenderingState::RenderingTeardown => {
-                app.set_frame_image(slint::Image::default());
+                let _ = app.as_weak().upgrade_in_event_loop(|app| {
+                    app.set_frame_image(slint::Image::default());
+                });
                 shared_gpu = None;
                 fallback_image = None;
                 render_state.borrow_mut().gpu_renderer = false;

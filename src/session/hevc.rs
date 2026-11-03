@@ -101,7 +101,7 @@ pub(super) fn run(
                     | WriterCommand::ClipboardServer(_),
                 ) => {
                     return Err(Error::Clipboard(
-                        "HEVC uses the encrypted SSH clipboard in Files".into(),
+                        "HEVC uses the encrypted SSH controls in Clipboard".into(),
                     ));
                 }
                 Err(TryRecvError::Empty) => break,

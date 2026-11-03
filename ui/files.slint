@@ -3,7 +3,11 @@ import { GlassTheme, GlassPanel, Button, CheckBox } from "glass.slint";
 
 export struct FileRow { name: string, detail: string, directory: bool, regular: bool }
 
-export component FilesOverlay inherits Rectangle {
+export component SshSharingOverlay inherits Rectangle {
+    in property <bool> clipboard-view: false;
+    in-out property <bool> shared;
+    in property <string> mode;
+    in property <bool> vnc-available: true;
     in property <string> host;
     in-out property <string> port: "22";
     in-out property <string> username;
@@ -36,6 +40,8 @@ export component FilesOverlay inherits Rectangle {
     callback cancel();
     callback copy-text();
     callback send-text();
+    callback changed();
+    callback paste-text();
     background: GlassTheme.dark ? #00000099 : #00000033;
     TouchArea { clicked => { root.close(); } }
     FocusScope {
@@ -43,7 +49,8 @@ export component FilesOverlay inherits Rectangle {
         key-pressed(event) => { if event.text == Key.Escape { root.close(); return accept; } return reject; }
         GlassPanel {
             x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
-            width: min(840px, parent.width - 40px); height: min(720px, parent.height - 40px);
+            width: min(root.clipboard-view ? 620px : 840px, parent.width - 40px);
+            height: min(root.clipboard-view ? 650px : 720px, parent.height - 40px);
             raised: true; radius: 24px;
             TouchArea { }
             VerticalLayout {
@@ -51,15 +58,33 @@ export component FilesOverlay inherits Rectangle {
                 HorizontalLayout {
                     VerticalLayout {
                         spacing: 2px;
-                        Text { text: "Files & encrypted clipboard"; color: GlassTheme.ink; font-size: 22px; font-weight: 700; }
+                        Text { text: root.clipboard-view ? "Clipboard" : "Files"; color: GlassTheme.ink; font-size: 22px; font-weight: 700; }
                         Text { text: root.host + "  -  SSH / SFTP"; color: GlassTheme.muted; font-size: 12px; }
                     }
                     Button { text: "Done"; clicked => { root.close(); } }
                 }
                 ScrollView {
-                VerticalLayout {
-                spacing: 12px;
+                horizontal-scrollbar-policy: always-off;
+                content-width: self.visible-width;
+                content-height: sharing-content.preferred-height;
+                sharing-content := VerticalLayout {
+                spacing: 12px; padding: 4px;
                 if root.error != "" : Text { text: root.error; accessible-label: "SSH operation error: " + root.error; color: GlassTheme.dark ? #ff6961 : #c62820; wrap: word-wrap; font-size: 12px; }
+                if root.clipboard-view && !root.key-pending : VerticalLayout {
+                    spacing: 12px;
+                    if root.vnc-available : CheckBox { text: "Share plain-text clipboard over VNC"; checked <=> root.shared; toggled => { root.changed(); } }
+                    Text { text: root.mode; color: GlassTheme.accent; font-size: 12px; wrap: word-wrap; }
+                    if root.vnc-available : Text { text: "Ctrl+V sends Windows text when pasting into your Mac. Incoming Mac text can replace your Windows clipboard while the viewer is active. Clipboard contents are never logged."; color: GlassTheme.muted; wrap: word-wrap; font-size: 13px; }
+                    if root.vnc-available : Button { text: "Paste Windows text"; enabled: root.shared; clicked => { root.paste-text(); } }
+                    if root.vnc-available : Text { text: "VNC clipboard traffic is not encrypted. Use a VPN. Files, images, and rich text are not shared."; color: GlassTheme.muted; wrap: word-wrap; font-size: 12px; }
+                    Text { text: "Encrypted SSH clipboard"; color: GlassTheme.ink; font-size: 16px; font-weight: 600; }
+                    HorizontalLayout {
+                        Button { text: "Copy Mac text"; enabled: root.connected && !root.busy; clicked => { root.copy-text(); } }
+                        Button { text: "Send Windows text"; enabled: root.connected && !root.busy; clicked => { root.send-text(); } }
+                    }
+                    if root.connected : Button { text: "Disconnect SSH"; enabled: !root.busy; clicked => { root.disconnect(); } }
+                    Text { text: "Unicode clipboard uses this SSH account's logged-in Mac desktop. No images, rich text, or clipboard contents are logged."; color: GlassTheme.muted; wrap: word-wrap; font-size: 11px; }
+                }
                 if root.key-pending : GlassPanel {
                     radius: 16px;
                     VerticalLayout {
@@ -79,7 +104,7 @@ export component FilesOverlay inherits Rectangle {
                 }
                 if !root.connected && !root.key-pending : VerticalLayout {
                     spacing: 14px;
-                    Text { text: "On your Mac: System Settings > General > Sharing > Remote Login. Allow your Mac account. Screen Sharing alone does not provide SFTP."; color: GlassTheme.muted; wrap: word-wrap; font-size: 13px; }
+                    Text { text: "On your Mac: System Settings > General > Sharing > Remote Login. Allow your Mac account."; color: GlassTheme.muted; wrap: word-wrap; font-size: 13px; }
                     HorizontalLayout {
                         Text { text: "SSH port"; color: GlassTheme.muted; vertical-alignment: center; }
                         LineEdit { text <=> root.port; enabled: !root.connecting; max-width: 100px; accessible-label: "SSH port"; }
@@ -99,7 +124,7 @@ export component FilesOverlay inherits Rectangle {
                     }
                     Rectangle { background: transparent; vertical-stretch: 1; }
                 }
-                if root.connected && !root.key-pending : VerticalLayout {
+                if !root.clipboard-view && root.connected && !root.key-pending : VerticalLayout {
                     spacing: 10px;
                     HorizontalLayout {
                         Button { text: "Up"; enabled: !root.busy && root.directory-ready; clicked => { root.up(); } }
@@ -135,13 +160,8 @@ export component FilesOverlay inherits Rectangle {
                         Button { text: "Send a file..."; primary: true; enabled: !root.busy && root.directory-ready; clicked => { root.upload(); } }
                     }
                     Text { text: "Single files only. Existing files are never replaced. Uploads are verified by reading them back before the final file is created."; color: GlassTheme.muted; wrap: word-wrap; font-size: 11px; }
-                    HorizontalLayout {
-                        Button { text: "Copy Mac text"; enabled: !root.busy; clicked => { root.copy-text(); } }
-                        Button { text: "Send Windows text"; enabled: !root.busy; clicked => { root.send-text(); } }
-                        Rectangle { background: transparent; horizontal-stretch: 1; }
-                    }
-                    Text { text: "Unicode clipboard uses this SSH account's logged-in Mac desktop. No images, rich text, or clipboard contents are logged."; color: GlassTheme.muted; wrap: word-wrap; font-size: 11px; }
-                    if root.busy : VerticalLayout {
+                }
+                    if root.connected && root.busy : VerticalLayout {
                         spacing: 6px;
                         Rectangle { height: 4px; background: GlassTheme.edge; border-radius: 2px; Rectangle { width: parent.width * root.progress; background: GlassTheme.accent; border-radius: 2px; } }
                         HorizontalLayout {
@@ -151,9 +171,10 @@ export component FilesOverlay inherits Rectangle {
                     }
                 }
                 }
-                }
                 Text { text: root.status; color: GlassTheme.muted; font-size: 12px; wrap: word-wrap; }
             }
         }
     }
 }
+
+export component FilesOverlay inherits SshSharingOverlay { }
