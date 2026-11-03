@@ -7,6 +7,7 @@ use crate::{
 };
 
 const SCROLL_PIXELS_PER_NOTCH: f64 = 60.0;
+const MACOS_PIXELS_PER_SCROLL_LINE: u32 = 12;
 const SCROLL_BATCH: u16 = 16;
 const MAX_PENDING_SCROLL: f64 = 4096.0;
 
@@ -14,6 +15,7 @@ const MAX_PENDING_SCROLL: f64 = 4096.0;
 pub struct ScrollScale {
     horizontal: u32,
     vertical: u32,
+    pixels_per_line: u32,
 }
 
 impl ScrollScale {
@@ -43,12 +45,20 @@ impl ScrollScale {
         Ok(Self {
             horizontal,
             vertical,
+            pixels_per_line: 1,
         })
     }
 
-    fn units(setting: u32) -> f64 {
+    pub fn for_macos(self) -> Self {
+        Self {
+            pixels_per_line: MACOS_PIXELS_PER_SCROLL_LINE,
+            ..self
+        }
+    }
+
+    fn units(self, setting: u32) -> f64 {
         // RFB has no page unit; use a bounded page-like burst for that Windows preference.
-        f64::from(if setting == u32::MAX { 20 } else { setting })
+        f64::from(if setting == u32::MAX { 20 } else { setting }) * f64::from(self.pixels_per_line)
     }
 }
 
@@ -61,9 +71,9 @@ pub struct ScrollAccumulator {
 impl ScrollAccumulator {
     pub fn add(&mut self, x: f32, y: f32, scale: ScrollScale) -> Result<()> {
         let horizontal = self.horizontal
-            + f64::from(x) / SCROLL_PIXELS_PER_NOTCH * ScrollScale::units(scale.horizontal);
-        let vertical = self.vertical
-            + f64::from(y) / SCROLL_PIXELS_PER_NOTCH * ScrollScale::units(scale.vertical);
+            + f64::from(x) / SCROLL_PIXELS_PER_NOTCH * scale.units(scale.horizontal);
+        let vertical =
+            self.vertical + f64::from(y) / SCROLL_PIXELS_PER_NOTCH * scale.units(scale.vertical);
         if !horizontal.is_finite()
             || !vertical.is_finite()
             || horizontal.abs() > MAX_PENDING_SCROLL
@@ -229,7 +239,63 @@ mod tests {
     const NORMAL_SCROLL: ScrollScale = ScrollScale {
         horizontal: 3,
         vertical: 3,
+        pixels_per_line: 1,
     };
+
+    #[test]
+    fn macos_pixel_wheel_preserves_windows_line_distance() {
+        let mut scroll = ScrollAccumulator::default();
+        scroll.add(0.0, 60.0, NORMAL_SCROLL.for_macos()).unwrap();
+        assert_eq!(scroll.drain(), ScrollSteps::new(0, 16).unwrap());
+        assert_eq!(scroll.drain(), ScrollSteps::new(0, 16).unwrap());
+        assert_eq!(scroll.drain(), ScrollSteps::new(0, 4).unwrap());
+        assert!(scroll.drain().is_empty());
+    }
+
+    #[test]
+    fn macos_pixel_wheel_keeps_fractional_motion_and_both_directions() {
+        let mut scroll = ScrollAccumulator::default();
+        let mut total = (0, 0);
+        for _ in 0..4 {
+            scroll.add(15.0, -15.0, NORMAL_SCROLL.for_macos()).unwrap();
+            loop {
+                let steps = scroll.drain();
+                if steps.is_empty() {
+                    break;
+                }
+                total.0 += i32::from(steps.horizontal);
+                total.1 += i32::from(steps.vertical);
+            }
+        }
+        assert_eq!(total, (36, -36));
+    }
+
+    #[test]
+    fn macos_pixel_wheel_honors_disabled_axes_and_page_settings() {
+        let mut scroll = ScrollAccumulator::default();
+        scroll
+            .add(
+                60.0,
+                60.0,
+                ScrollScale {
+                    horizontal: 0,
+                    vertical: u32::MAX,
+                    pixels_per_line: 1,
+                }
+                .for_macos(),
+            )
+            .unwrap();
+        let mut total = 0;
+        loop {
+            let steps = scroll.drain();
+            if steps.is_empty() {
+                break;
+            }
+            assert_eq!(steps.horizontal, 0);
+            total += i32::from(steps.vertical);
+        }
+        assert_eq!(total, 240);
+    }
 
     #[test]
     fn wheel_magnitude_and_windows_sensitivity_are_preserved() {
@@ -287,6 +353,7 @@ mod tests {
                 ScrollScale {
                     horizontal: 0,
                     vertical: u32::MAX,
+                    pixels_per_line: 1,
                 },
             )
             .unwrap();

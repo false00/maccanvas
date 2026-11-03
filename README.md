@@ -176,13 +176,32 @@ cargo build --release --locked
 ```
 
 The pinned toolchain builds `target\x86_64-pc-windows-msvc\release\maccanvas.exe`.
-Rust + Slint, software rendering, a bundled libde265 decoder, and static Microsoft C runtime.
+Rust + Slint with GPU rendering, automatic NVIDIA NVDEC decoding for supported
+8-bit HEVC 4:4:4 streams, a bundled libde265 software fallback, and static Microsoft C runtime.
+NVIDIA decoding uses the installed driver; no CUDA toolkit is required.
 Windows releases are built and tested in GitHub Actions.
+
+Inspect adapter and decoder capabilities without connecting:
+
+```powershell
+cargo run --release -- --video-info
+```
+
+For fallback testing, set `$env:MACCANVAS_VIDEO_DECODER = 'software'` before
+launching; remove it with `Remove-Item Env:MACCANVAS_VIDEO_DECODER` to return to
+automatic selection. `SLINT_BACKEND=winit-software` selects software UI rendering.
+GPU decoding and color conversion use NVDEC and D3D11, followed by a readback for
+the Slint GPU renderer. Direct D3D11/OpenGL texture sharing is experimental and
+disabled by default after failing live presentation testing; it can be requested
+with `MACCANVAS_GPU_PRESENTATION=shared` for diagnostics only. Unsupported streams
+or hardware decode errors fall back to libde265. HEVC frames use a bounded
+latest-frame pacer, and cached Mac cursor shapes are drawn locally.
 
 Protocol references and prior art: [TigerVNC](https://tigervnc.org/),
 RealVNC, TightVNC, the original VNC authors, and
 [iShareScreen](https://github.com/renegadelink/iShareScreen) for Apple's
-High Performance protocol implementation.
+High Performance protocol implementation. Low-latency client rendering patterns
+were informed by [Moonlight](https://github.com/moonlight-stream/moonlight-qt).
 
 **Viewer: AGPL-3.0-or-later.** The optional audio converter has separate
 [0BSD/Fraunhofer terms](crates/audio-codec-tool/README.md).

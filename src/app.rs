@@ -5,7 +5,7 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     rc::Rc,
-    sync::atomic::Ordering,
+    sync::atomic::{AtomicBool, Ordering},
     sync::{Arc, Mutex, mpsc},
     time::{Duration, Instant},
 };
@@ -65,6 +65,8 @@ struct State {
     generation: u64,
     frames: Frames,
     frame: Option<Arc<Framebuffer>>,
+    gpu_frame: Option<Arc<maccanvas::render::gpu::nvdec::Frame>>,
+    gpu_renderer: bool,
     source_size: Option<Extent>,
     viewport: Option<Viewport>,
     renderer: Renderer,
@@ -334,13 +336,20 @@ fn refresh_layout(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
         state.viewport = Some(viewport);
         state.ticket += 1;
         if let Some(frame) = state.frame.clone() {
-            state.renderer.request(Job {
-                frame,
-                viewport,
-                generation: state.generation,
-                ticket: state.ticket,
-                frame_number: state.frame_number,
-            })?;
+            if state.gpu_renderer {
+                let mut pixels =
+                    SharedPixelBuffer::<Rgba8Pixel>::new(frame.size.width, frame.size.height);
+                pixels.make_mut_bytes().copy_from_slice(&frame.rgba);
+                app.set_frame_image(slint::Image::from_rgba8(pixels));
+            } else {
+                state.renderer.request(Job {
+                    frame,
+                    viewport,
+                    generation: state.generation,
+                    ticket: state.ticket,
+                    frame_number: state.frame_number,
+                })?;
+            }
         }
         viewport
     };
@@ -348,9 +357,14 @@ fn refresh_layout(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
     app.set_draw_top(viewport.top);
     app.set_draw_width(viewport.width);
     app.set_draw_height(viewport.height);
+    let scaling = if state.borrow().gpu_renderer {
+        "GPU fit"
+    } else {
+        "Lanczos fit"
+    };
     app.set_desktop_description(
         format!(
-            "{} x {}  |  Lanczos fit",
+            "{} x {}  |  {scaling}",
             viewport.source.width, viewport.source.height
         )
         .into(),
@@ -369,6 +383,105 @@ fn disconnect(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
     result
 }
 
+fn tick_video(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
+    let gpu = state
+        .borrow()
+        .session
+        .as_ref()
+        .map(Session::take_gpu_frame)
+        .transpose()?
+        .flatten();
+    let gpu_changed = gpu.is_some();
+    if let Some(frame) = gpu {
+        let mut state = state.borrow_mut();
+        let size_changed = state.source_size != Some(frame.size);
+        app.set_remote_cursor_frame_width(frame.size.width as f32);
+        state.source_size = Some(frame.size);
+        state.frame = None;
+        state.frame_number += 1;
+        if state.gpu_renderer {
+            state.gpu_frame = Some(frame);
+        } else {
+            let rgba = frame.read_rgba()?;
+            state.frame = Some(Arc::new(Framebuffer {
+                size: frame.size,
+                rgba,
+            }));
+            state.gpu_frame = None;
+        }
+        if size_changed {
+            guide(app, state.source_size);
+        }
+        app.window().request_redraw();
+    }
+    let frame = state
+        .borrow()
+        .frames
+        .lock()
+        .map_err(|_| Error::Display("Frame queue is unavailable".into()))?
+        .take();
+    let changed = frame.is_some() || gpu_changed;
+    if let Some(frame) = frame {
+        let mut state = state.borrow_mut();
+        let size_changed = state.source_size != Some(frame.size);
+        app.set_remote_cursor_frame_width(frame.size.width as f32);
+        state.source_size = Some(frame.size);
+        state.gpu_frame = None;
+        state.frame = Some(frame);
+        state.frame_number += 1;
+        if size_changed {
+            guide(app, state.source_size);
+        }
+    }
+    let layout = (
+        app.get_canvas_width(),
+        app.get_canvas_height(),
+        app.window().scale_factor(),
+    );
+    if changed || layout != state.borrow().layout {
+        refresh_layout(app, state)?;
+    }
+    if changed && state.borrow().frame_number == 1 {
+        let state = state.borrow();
+        state.audit.event(
+            "media.hevc.presentation.frame_ready",
+            Level::Info,
+            json!({
+                "media.frame.width":state.source_size.map(|size| size.width),
+                "media.frame.height":state.source_size.map(|size| size.height),
+                "media.renderer.gpu":state.gpu_renderer,
+                "media.frame.gpu":state.gpu_frame.is_some(),
+                "media.draw.width":app.get_draw_width(),
+                "media.draw.height":app.get_draw_height(),
+            }),
+        )?;
+    }
+    let rendered = state.borrow().renderer.take()?;
+    if let Some(rendered) = rendered {
+        let valid = {
+            let state = state.borrow();
+            rendered.generation == state.generation
+                && !state.gpu_renderer
+                && rendered.ticket <= state.ticket
+                && state.viewport == Some(rendered.viewport)
+        };
+        if valid {
+            let mut pixels = SharedPixelBuffer::<Rgba8Pixel>::new(
+                rendered.viewport.pixels.width,
+                rendered.viewport.pixels.height,
+            );
+            pixels.make_mut_bytes().copy_from_slice(&rendered.rgba);
+            app.set_frame_image(slint::Image::from_rgba8(pixels));
+            let mut state = state.borrow_mut();
+            if rendered.frame_number != state.last_displayed_frame {
+                state.last_displayed_frame = rendered.frame_number;
+                state.monitor.displayed();
+            }
+        }
+    }
+    Ok(())
+}
+
 fn close_stream(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
     let result = {
         let mut state = state.borrow_mut();
@@ -376,6 +489,7 @@ fn close_stream(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
         let session = state.session.take();
         state.generation += 1;
         state.frame = None;
+        state.gpu_frame = None;
         state.source_size = None;
         state.viewport = None;
         state.monitor = Monitor::new(Instant::now());
@@ -454,6 +568,9 @@ fn start_connection(
     let reconnect_credentials = credentials.clone();
     state.generation += 1;
     state.frames = Arc::new(Mutex::new(None));
+    state.gpu_frame = None;
+    app.set_remote_cursor_ready(false);
+    app.set_remote_cursor_hidden(false);
     state.monitor = Monitor::new(Instant::now());
     state.frame_number = 0;
     state.last_displayed_frame = 0;
@@ -476,6 +593,28 @@ fn start_connection(
         generation: state.generation,
     };
     let session = Session::start(request, events.clone(), state.frames.clone())?;
+    let weak = Arc::new(Mutex::new(app.as_weak()));
+    let queued = Arc::new(AtomicBool::new(false));
+    session.set_frame_notifier(Arc::new(move || {
+        if queued.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let Ok(weak) = weak.lock() else {
+            queued.store(false, Ordering::Release);
+            return;
+        };
+        let pending = queued.clone();
+        if weak
+            .clone()
+            .upgrade_in_event_loop(move |app| {
+                pending.store(false, Ordering::Release);
+                app.invoke_video_frame_ready();
+            })
+            .is_err()
+        {
+            queued.store(false, Ordering::Release);
+        }
+    }))?;
     state.connection_profile = Some(profile);
     state.connection_credentials = Some(reconnect_credentials);
     state.session = Some(session);
@@ -1058,6 +1197,8 @@ pub fn run(
         generation: 0,
         frames: Arc::new(Mutex::new(None)),
         frame: None,
+        gpu_frame: None,
+        gpu_renderer: false,
         source_size: None,
         viewport: None,
         renderer: Renderer::new(),
@@ -1076,7 +1217,124 @@ pub fn run(
         theme_checked: Instant::now(),
         updater,
     }));
+    let render_state = state.clone();
+    let render_app = app.as_weak();
+    let mut shared_gpu: Option<maccanvas::render::gpu::interop::Interop> = None;
+    let readback_requested = !maccanvas::render::gpu::direct_sharing_enabled();
+    let mut sharing_failed = readback_requested;
+    let mut sharing_reported = false;
+    let mut fallback_image: Option<(Arc<maccanvas::render::gpu::nvdec::Frame>, slint::Image)> =
+        None;
+    let mut presented = None;
+    let mut render_generation = 0;
+    let _ = app.window().set_rendering_notifier(move |phase, api| {
+        let Some(app) = render_app.upgrade() else { return };
+        match phase {
+            slint::RenderingState::RenderingSetup => {
+                render_state.borrow_mut().gpu_renderer = matches!(api, slint::GraphicsAPI::NativeOpenGL { .. });
+                let _ = render_state.borrow().audit.event("application.renderer.selected", Level::Info,
+                    json!({"media.renderer":if matches!(api, slint::GraphicsAPI::NativeOpenGL { .. }) { "opengl" } else { "software" }}));
+            }
+            slint::RenderingState::BeforeRendering => {
+                let (frame, generation, number, has_frame) = {
+                    let state = render_state.borrow();
+                    (state.gpu_frame.clone(), state.generation, state.frame_number, state.source_size.is_some())
+                };
+                if generation != render_generation {
+                    shared_gpu = None;
+                    fallback_image = None;
+                    sharing_failed = readback_requested;
+                    sharing_reported = false;
+                    render_generation = generation;
+                }
+                if let Some(frame) = frame {
+                    if let slint::GraphicsAPI::NativeOpenGL { get_proc_address } = api
+                        && shared_gpu.is_none() && !sharing_failed
+                    {
+                        match unsafe { maccanvas::render::gpu::interop::Interop::new(get_proc_address) } {
+                            Ok(interop) => shared_gpu = Some(interop),
+                            Err(error) => {
+                                sharing_failed = true;
+                                let _ = render_state.borrow().audit.event("media.hevc.presentation.fallback", Level::Info,
+                                    json!({"media.presentation":"gpu_readback","error.message":error.to_string()}));
+                            }
+                        }
+                    }
+                    let direct = if let Some(interop) = shared_gpu.as_mut() {
+                        match interop.image(&frame) {
+                            Ok(image) => Some(image),
+                            Err(error) => {
+                                interop.finish();
+                                sharing_failed = true;
+                                let _ = render_state.borrow().audit.event("media.hevc.presentation.fallback", Level::Info,
+                                    json!({"media.presentation":"gpu_readback","error.message":error.to_string()}));
+                                None
+                            }
+                        }
+                    } else { None };
+                    if let Some(image) = direct {
+                        if !sharing_reported {
+                            let _ = render_state.borrow().audit.event("media.hevc.presentation.selected", Level::Info,
+                                json!({"media.presentation":"d3d11_opengl_shared","media.cpu.readback":false}));
+                            sharing_reported = true;
+                        }
+                        fallback_image = None;
+                        app.set_frame_image(image);
+                    } else {
+                        if sharing_failed { shared_gpu = None; }
+                        let unchanged = fallback_image.as_ref().is_some_and(|(previous, _)| Arc::ptr_eq(previous, &frame));
+                        if !unchanged {
+                            match frame.read_rgba() {
+                                Ok(rgba) => {
+                                    let mut pixels = SharedPixelBuffer::<Rgba8Pixel>::new(frame.size.width, frame.size.height);
+                                    pixels.make_mut_bytes().copy_from_slice(&rgba);
+                                    fallback_image = Some((frame, slint::Image::from_rgba8(pixels)));
+                                }
+                                Err(error) => notify(&app, error),
+                            }
+                        }
+                        if let Some((_, image)) = &fallback_image {
+                            if !sharing_reported {
+                                let _ = render_state.borrow().audit.event("media.hevc.presentation.selected", Level::Info,
+                                    json!({"media.presentation":"gpu_readback","media.cpu.readback":true}));
+                                sharing_reported = true;
+                            }
+                            app.set_frame_image(image.clone());
+                        }
+                    }
+                }
+                presented = has_frame.then_some((generation, number));
+            }
+            slint::RenderingState::AfterRendering => {
+                if let Some(interop) = shared_gpu.as_mut() { interop.finish(); }
+                if let Some((generation, number)) = presented.take() {
+                    let mut state = render_state.borrow_mut();
+                    if state.generation == generation && state.last_displayed_frame != number {
+                        state.last_displayed_frame = number;
+                        state.monitor.displayed();
+                    }
+                }
+            }
+            slint::RenderingState::RenderingTeardown => {
+                app.set_frame_image(slint::Image::default());
+                shared_gpu = None;
+                fallback_image = None;
+                render_state.borrow_mut().gpu_renderer = false;
+            }
+            _ => (),
+        }
+    });
     model(&app, &state.borrow());
+    let frame_state = state.clone();
+    let frame_app = app.as_weak();
+    app.on_video_frame_ready(move || {
+        let Some(app) = frame_app.upgrade() else {
+            return;
+        };
+        if let Err(error) = tick_video(&app, &frame_state) {
+            notify(&app, error);
+        }
+    });
     let weak = app.as_weak();
     let connection_state = state.clone();
     let connection_events = events.clone();
@@ -1513,7 +1771,11 @@ pub fn run(
             };
             state.flush_pointer()?;
             state.pointer = (x, y);
-            let scale = state.scroll_scale;
+            let scale = if state.session.as_ref().is_some_and(Session::uses_hevc) {
+                state.scroll_scale.for_macos()
+            } else {
+                state.scroll_scale
+            };
             state.scroll.add(event.delta_x, event.delta_y, scale)?;
             state.flush_scroll()
         })();
@@ -1747,6 +2009,28 @@ pub fn run(
                         }
                     }
                     Event::Warning(message) => notify(&app, message),
+                    Event::Cursor { update, point_scale } => {
+                        app.set_remote_cursor_scale(point_scale);
+                        match update {
+                            maccanvas::apple_hps::cursor::Update::Image(cursor) => {
+                                let mut pixels = SharedPixelBuffer::<Rgba8Pixel>::new(
+                                    u32::from(cursor.width), u32::from(cursor.height),
+                                );
+                                pixels.make_mut_bytes().copy_from_slice(&cursor.rgba);
+                                app.set_remote_cursor_image(slint::Image::from_rgba8(pixels));
+                                app.set_remote_cursor_width(f32::from(cursor.width));
+                                app.set_remote_cursor_height(f32::from(cursor.height));
+                                app.set_remote_cursor_hotspot_x(f32::from(cursor.hotspot_x));
+                                app.set_remote_cursor_hotspot_y(f32::from(cursor.hotspot_y));
+                                app.set_remote_cursor_hidden(false);
+                                app.set_remote_cursor_ready(true);
+                            }
+                            maccanvas::apple_hps::cursor::Update::Hidden => {
+                                app.set_remote_cursor_ready(false);
+                                app.set_remote_cursor_hidden(true);
+                            }
+                        }
+                    }
                     Event::Audio(status) => {
                         let missing = matches!(status, maccanvas::audio::Status::CodecMissing(_));
                         app.set_audio_codec_missing(missing);
@@ -1797,53 +2081,7 @@ pub fn run(
                 tick_reconnect(&app, &timer_state, &events)?;
                 tick_clipboard(&app, &mut timer_state.borrow_mut())?;
                 files_ui::tick(&app,&mut timer_state.borrow_mut())?;
-                let frame = timer_state
-                    .borrow()
-                    .frames
-                    .lock()
-                    .map_err(|_| Error::Display("Frame queue is unavailable".into()))?
-                    .take();
-                let changed = frame.is_some();
-                if let Some(frame) = frame {
-                    let mut state = timer_state.borrow_mut();
-                    let size_changed = state.source_size != Some(frame.size);
-                    state.source_size = Some(frame.size);
-                    state.frame = Some(frame);
-                    state.frame_number += 1;
-                    if size_changed {
-                        guide(&app, state.source_size);
-                    }
-                }
-                let layout = (
-                    app.get_canvas_width(),
-                    app.get_canvas_height(),
-                    app.window().scale_factor(),
-                );
-                if changed || layout != timer_state.borrow().layout {
-                    refresh_layout(&app, &timer_state)?;
-                }
-                let rendered = timer_state.borrow().renderer.take()?;
-                if let Some(rendered) = rendered {
-                    let valid = {
-                        let state = timer_state.borrow();
-                        rendered.generation == state.generation
-                            && rendered.ticket <= state.ticket
-                            && state.viewport == Some(rendered.viewport)
-                    };
-                    if valid {
-                        let mut pixels = SharedPixelBuffer::<Rgba8Pixel>::new(
-                            rendered.viewport.pixels.width,
-                            rendered.viewport.pixels.height,
-                        );
-                        pixels.make_mut_bytes().copy_from_slice(&rendered.rgba);
-                        app.set_frame_image(slint::Image::from_rgba8(pixels));
-                        let mut state = timer_state.borrow_mut();
-                        if rendered.frame_number != state.last_displayed_frame {
-                            state.last_displayed_frame = rendered.frame_number;
-                            state.monitor.displayed();
-                        }
-                    }
-                }
+                tick_video(&app, &timer_state)?;
                 if app.get_connected() {
                     let mut state = timer_state.borrow_mut();
                     state.flush_pointer()?;
@@ -1868,7 +2106,11 @@ pub fn run(
                     .map(|session| session.counters.clone())
                 {
                     app.set_active_encoding(
-                        encoding_name(counters.encoding.load(Ordering::Relaxed)).into(),
+                        if counters.decoder.load(Ordering::Relaxed) == 1 {
+                            format!("{} | NVIDIA NVDEC", encoding_name(counters.encoding.load(Ordering::Relaxed))).into()
+                        } else {
+                            encoding_name(counters.encoding.load(Ordering::Relaxed)).into()
+                        },
                     );
                     let (ssh_received,ssh_sent) = state.files.network();
                     let combined = telemetry::Counters::default();

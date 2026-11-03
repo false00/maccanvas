@@ -80,6 +80,7 @@ pub(super) fn run(
         request.streaming.max_fps,
         request.audit.clone(),
         request.audio,
+        request.window != 0,
     )?;
     let mut profile = Some(request.profile);
     let mut credentials = Some(credentials);
@@ -112,6 +113,17 @@ pub(super) fn run(
             Err(_) if control.cancelled.load(Ordering::Acquire) => return Ok(()),
             Err(error) => return Err(error),
         };
+        if let Some((update, point_scale)) = client.cursor_status() {
+            events
+                .send((
+                    request.generation,
+                    Event::Cursor {
+                        update,
+                        point_scale,
+                    },
+                ))
+                .map_err(|_| Error::Protocol("Connection window closed".into()))?;
+        }
         if let Some(frame) = frame {
             if let Some(mut connected) = profile.take() {
                 let mut credentials_saved = false;
@@ -142,8 +154,8 @@ pub(super) fn run(
                     "media.hevc.first_frame",
                     Level::Info,
                     json!({
-                        "media.codec.name":"hevc","media.width":frame.size.width,
-                        "media.height":frame.size.height,"network.encrypted":true,
+                        "media.codec.name":"hevc","media.width":frame.size().width,
+                        "media.height":frame.size().height,"network.encrypted":true,
                     }),
                 )?;
                 events
@@ -157,10 +169,38 @@ pub(super) fn run(
                     ))
                     .map_err(|_| Error::Protocol("Connection window closed".into()))?;
             }
-            *frames
+            match frame {
+                apple_hps::Frame::Software(frame) => {
+                    control
+                        .gpu_frame
+                        .lock()
+                        .map_err(|_| Error::Display("GPU frame queue is unavailable".into()))?
+                        .take();
+                    *frames
+                        .lock()
+                        .map_err(|_| Error::Display("Frame queue is unavailable".into()))? =
+                        Some(Arc::new(frame));
+                }
+                apple_hps::Frame::Gpu(frame) => {
+                    frames
+                        .lock()
+                        .map_err(|_| Error::Display("Frame queue is unavailable".into()))?
+                        .take();
+                    *control
+                        .gpu_frame
+                        .lock()
+                        .map_err(|_| Error::Display("GPU frame queue is unavailable".into()))? =
+                        Some(frame);
+                }
+            }
+            let notifier = control
+                .frame_notifier
                 .lock()
-                .map_err(|_| Error::Display("Frame queue is unavailable".into()))? =
-                Some(Arc::new(frame));
+                .map_err(|_| Error::Display("Frame notification is unavailable".into()))?
+                .clone();
+            if let Some(notifier) = notifier {
+                notifier();
+            }
         }
         thread::sleep(Duration::from_millis(2));
     }

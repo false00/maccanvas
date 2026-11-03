@@ -15,6 +15,7 @@ pub struct Counters {
     pub received: AtomicU64,
     pub sent: AtomicU64,
     pub encoding: AtomicI32,
+    pub decoder: AtomicI32,
 }
 
 impl Counters {

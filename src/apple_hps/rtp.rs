@@ -9,6 +9,9 @@ use super::crypto::Packet;
 
 const MAX_UNIT: usize = 16 * 1024 * 1024;
 const MAX_PACKETS: usize = 16_384;
+const MAX_GROUPS: usize = 64;
+const MAX_WINDOW_BYTES: usize = 8 * MAX_UNIT;
+const MAX_WINDOW_PACKETS: usize = 8 * MAX_PACKETS;
 
 fn failed(message: &str) -> Error {
     Error::Protocol(format!("HEVC RTP: {message}"))
@@ -21,6 +24,48 @@ struct Group {
     bytes: usize,
 }
 
+#[derive(serde::Serialize)]
+struct GroupSnapshot {
+    timestamp: u32,
+    first: u64,
+    last: u64,
+    end: Option<u64>,
+    packets: usize,
+    bytes: usize,
+    age_ms: u128,
+    nal_type: u8,
+    fragment_start: Option<bool>,
+}
+
+impl Group {
+    fn snapshot(&self, timestamp: u32, now: Instant) -> GroupSnapshot {
+        let (&first, packet) = self.packets.first_key_value().expect("nonempty group");
+        let nal_type = (packet.payload[0] >> 1) & 63;
+        GroupSnapshot {
+            timestamp,
+            first,
+            last: *self.packets.last_key_value().expect("nonempty group").0,
+            end: self.end,
+            packets: self.packets.len(),
+            bytes: self.bytes,
+            age_ms: now.duration_since(self.created).as_millis(),
+            nal_type,
+            fragment_start: packet
+                .payload
+                .get(2)
+                .filter(|_| nal_type == 49)
+                .map(|header| header & 128 != 0),
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+pub(super) struct Loss {
+    pub reason: String,
+    previous: Option<u64>,
+    groups: Vec<GroupSnapshot>,
+}
+
 pub(super) struct Unit {
     pub annex_b: Vec<u8>,
     pub timestamp: i64,
@@ -31,7 +76,7 @@ pub(super) struct Assembler {
     groups: BTreeMap<u32, Group>,
     parameters: BTreeMap<u8, Vec<u8>>,
     previous: Option<u64>,
-    lost: Option<String>,
+    lost: Option<Loss>,
     donl: Option<bool>,
 }
 
@@ -62,6 +107,9 @@ impl Assembler {
         if packet.payload.len() < 2 {
             return Err(failed("truncated authenticated payload"));
         }
+        if self.previous.is_some_and(|last| packet.index <= last) {
+            return Ok(());
+        }
         let nal_type = (packet.payload[0] >> 1) & 63;
         if matches!(nal_type, 32..=34) && self.donl.is_some() {
             let prefix = if self.donl == Some(true) { 4 } else { 2 };
@@ -75,10 +123,27 @@ impl Assembler {
             }
             self.parameters.insert(nal_type, nal);
         }
-        if !self.groups.contains_key(&packet.timestamp) && self.groups.len() >= 8 {
+        if !self.groups.contains_key(&packet.timestamp) && self.groups.len() >= MAX_GROUPS {
+            self.lost.get_or_insert(Loss {
+                reason: "HEVC packet window exceeded its limit".into(),
+                previous: self.previous,
+                groups: self
+                    .groups
+                    .iter()
+                    .map(|(&timestamp, group)| group.snapshot(timestamp, now))
+                    .collect(),
+            });
             self.groups.clear();
             self.previous = None;
-            self.lost = Some("HEVC packet window exceeded its limit".into());
+        }
+        let (bytes, packets) = self
+            .groups
+            .values()
+            .fold((packet.payload.len(), 1), |(bytes, packets), group| {
+                (bytes + group.bytes, packets + group.packets.len())
+            });
+        if bytes > MAX_WINDOW_BYTES || packets > MAX_WINDOW_PACKETS {
+            return Err(failed("packet window exceeds its resource limit"));
         }
         let group = self
             .groups
@@ -100,20 +165,34 @@ impl Assembler {
         Ok(())
     }
 
+    fn ordered_timestamps(&self) -> Vec<u32> {
+        let mut timestamps: Vec<_> = self.groups.keys().copied().collect();
+        timestamps.sort_unstable_by_key(|timestamp| {
+            *self.groups[timestamp]
+                .packets
+                .first_key_value()
+                .expect("nonempty group")
+                .0
+        });
+        timestamps
+    }
+
     pub fn missing(&self, now: Instant) -> Vec<u16> {
         let mut missing = Vec::new();
-        for group in self.groups.values() {
-            if now.duration_since(group.created) < Duration::from_millis(8) {
-                continue;
-            }
+        let mut previous = self.previous;
+        for timestamp in self.ordered_timestamps() {
+            let group = &self.groups[&timestamp];
             let Some((&first, _)) = group.packets.first_key_value() else {
                 continue;
             };
-            let start = self.previous.map_or(first, |last| last.saturating_add(1));
+            let start = previous.map_or(first, |last| last.saturating_add(1));
             let end = group
                 .end
                 .unwrap_or_else(|| *group.packets.last_key_value().expect("nonempty group").0);
-            if end.saturating_sub(start) > MAX_PACKETS as u64 {
+            previous = Some(end);
+            if now.duration_since(group.created) < Duration::from_millis(8)
+                || end.saturating_sub(start) > MAX_PACKETS as u64
+            {
                 continue;
             }
             for index in start..=end {
@@ -128,54 +207,66 @@ impl Assembler {
         missing
     }
 
-    pub fn take_loss(&mut self) -> Option<String> {
+    pub fn take_loss(&mut self) -> Option<Loss> {
         self.lost.take()
     }
 
     pub fn ready(&mut self, now: Instant) -> Result<Vec<Unit>> {
         let mut output = Vec::new();
         let mut ready = Vec::new();
-        for (&timestamp, group) in &self.groups {
-            if now.duration_since(group.created) > Duration::from_millis(150) {
-                ready.push((timestamp, false));
-                continue;
-            }
-            let Some(end) = group.end else {
+        let mut previous = self.previous;
+        let timestamps = self.ordered_timestamps();
+        for (offset, &timestamp) in timestamps.iter().enumerate() {
+            let group = &self.groups[&timestamp];
+            let Some((&first, packet)) = group.packets.first_key_value() else {
                 continue;
             };
-            if let Some(packet) = group.packets.values().next()
-                && (packet.payload[0] >> 1) & 63 == 49
+            let start = previous.map_or(first, |last| last.saturating_add(1));
+            let fragment_without_start = (packet.payload[0] >> 1) & 63 == 49
                 && packet
                     .payload
                     .get(2)
-                    .is_some_and(|header| header & 128 == 0)
-            {
-                continue;
-            }
-            let Some((&first, _)) = group.packets.first_key_value() else {
-                continue;
-            };
-            let start = self.previous.map_or(first, |last| last.saturating_add(1));
-            let count = end
-                .checked_sub(start)
-                .and_then(|count| count.checked_add(1));
-            if count == Some(group.packets.len() as u64)
+                    .is_some_and(|header| header & 128 == 0);
+            let complete = !fragment_without_start
                 && first == start
-                && now.duration_since(group.created) >= Duration::from_millis(4)
-            {
-                ready.push((timestamp, true));
+                && group.end.is_some_and(|end| {
+                    end.checked_sub(start)
+                        .and_then(|count| count.checked_add(1))
+                        == Some(group.packets.len() as u64)
+                });
+            let elapsed = now.duration_since(group.created);
+            if complete && (previous.is_some() || elapsed >= Duration::from_millis(4)) {
+                ready.push((timestamp, true, group.end));
+                previous = group.end;
+            } else if elapsed > Duration::from_millis(150) {
+                previous = group
+                    .end
+                    .or_else(|| {
+                        timestamps.get(offset + 1).and_then(|next| {
+                            self.groups[next]
+                                .packets
+                                .first_key_value()
+                                .and_then(|(index, _)| index.checked_sub(1))
+                        })
+                    })
+                    .or_else(|| group.packets.last_key_value().map(|(index, _)| *index));
+                ready.push((timestamp, false, previous));
+            } else {
+                break;
             }
         }
-        for (timestamp, complete) in ready {
+        for (timestamp, complete, end) in ready {
             let group = self.groups.remove(&timestamp).expect("known packet group");
             if !complete {
-                self.previous = group
-                    .end
-                    .or_else(|| group.packets.last_key_value().map(|(index, _)| *index));
-                self.lost = Some("missing HEVC RTP marker or packets".into());
+                self.lost.get_or_insert(Loss {
+                    reason: "missing HEVC RTP marker or packets".into(),
+                    previous: self.previous,
+                    groups: vec![group.snapshot(timestamp, now)],
+                });
+                self.previous = end;
                 continue;
             }
-            self.previous = group.end;
+            self.previous = end;
             let packets: Vec<_> = group
                 .packets
                 .values()
@@ -187,7 +278,11 @@ impl Assembler {
             let nalus = match depacketize(packets.into_iter(), self.donl.unwrap_or(true)) {
                 Ok(nalus) => nalus,
                 Err(error) => {
-                    self.lost = Some(error.to_string());
+                    self.lost.get_or_insert(Loss {
+                        reason: error.to_string(),
+                        previous: self.previous,
+                        groups: vec![group.snapshot(timestamp, now)],
+                    });
                     continue;
                 }
             };
@@ -385,6 +480,259 @@ pub(super) fn sender_report(own: u32) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn picture(index: u64, timestamp: u32) -> Packet {
+        Packet {
+            index,
+            ssrc: 1,
+            timestamp,
+            marker: true,
+            payload: vec![2, 1, 0, 0, 128],
+        }
+    }
+
+    #[test]
+    fn queued_complete_frames_do_not_request_received_packets() {
+        let now = Instant::now();
+        let mut assembler = Assembler::new();
+        assembler.previous = Some(9);
+        assembler.push(picture(10, 100), now).unwrap();
+        assembler.push(picture(11, 200), now).unwrap();
+
+        assert!(
+            assembler
+                .missing(now + Duration::from_millis(10))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn queued_complete_frames_drain_in_one_poll() {
+        let now = Instant::now();
+        let mut assembler = Assembler::new();
+        assembler.previous = Some(9);
+        assembler.push(picture(10, 100), now).unwrap();
+        assembler.push(picture(11, 200), now).unwrap();
+
+        let units = assembler.ready(now + Duration::from_millis(10)).unwrap();
+        assert_eq!(units.len(), 2);
+        assert_eq!(units[0].timestamp, 100);
+        assert_eq!(units[1].timestamp, 200);
+        assert!(assembler.take_loss().is_none());
+    }
+
+    #[test]
+    fn sequence_anchored_complete_frame_does_not_wait_for_reordering() {
+        let now = Instant::now();
+        let mut assembler = Assembler::new();
+        assembler.previous = Some(9);
+        assembler.push(picture(10, 100), now).unwrap();
+
+        let units = assembler.ready(now).unwrap();
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].timestamp, 100);
+        assert!(assembler.take_loss().is_none());
+    }
+
+    #[test]
+    fn receiving_a_burst_can_drain_frames_without_overflowing_the_window() {
+        let now = Instant::now();
+        let mut assembler = Assembler::new();
+        assembler.previous = Some(9);
+        let mut units = Vec::new();
+        for index in 10..110 {
+            assembler
+                .push(picture(index, index as u32 * 100), now)
+                .unwrap();
+            units.extend(assembler.ready(now).unwrap());
+        }
+
+        assert_eq!(units.len(), 100);
+        assert_eq!(assembler.pending(), 0);
+        assert!(assembler.take_loss().is_none());
+    }
+
+    #[test]
+    fn complete_frame_survives_a_delayed_poll() {
+        let now = Instant::now();
+        let mut assembler = Assembler::new();
+        assembler.previous = Some(9);
+        assembler.push(picture(10, 100), now).unwrap();
+
+        let units = assembler.ready(now + Duration::from_millis(160)).unwrap();
+        assert_eq!(units.len(), 1);
+        assert!(assembler.take_loss().is_none());
+    }
+
+    #[test]
+    fn missing_packet_is_requested_once_and_blocks_later_frames() {
+        let now = Instant::now();
+        let mut assembler = Assembler::new();
+        assembler.previous = Some(9);
+        let mut first = picture(10, 100);
+        first.marker = false;
+        assembler.push(first, now).unwrap();
+        assembler.push(picture(12, 100), now).unwrap();
+        assembler.push(picture(13, 200), now).unwrap();
+
+        let poll = now + Duration::from_millis(10);
+        assert_eq!(assembler.missing(poll), vec![11]);
+        assert!(assembler.ready(poll).unwrap().is_empty());
+        assert!(assembler.take_loss().is_none());
+
+        let mut retransmission = picture(11, 100);
+        retransmission.marker = false;
+        assembler.push(retransmission, poll).unwrap();
+        let units = assembler.ready(poll).unwrap();
+        assert_eq!(units.len(), 2);
+        assert_eq!(units[0].timestamp, 100);
+        assert_eq!(units[1].timestamp, 200);
+        assert!(assembler.take_loss().is_none());
+    }
+
+    #[test]
+    fn actual_packet_loss_expires_without_discarding_the_next_complete_frame() {
+        let now = Instant::now();
+        let mut assembler = Assembler::new();
+        assembler.previous = Some(9);
+        let mut first = picture(10, 100);
+        first.marker = false;
+        assembler.push(first, now).unwrap();
+        assembler.push(picture(12, 100), now).unwrap();
+        assembler.push(picture(13, 200), now).unwrap();
+
+        let units = assembler.ready(now + Duration::from_millis(160)).unwrap();
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].timestamp, 200);
+        assert_eq!(
+            assembler
+                .take_loss()
+                .as_ref()
+                .map(|loss| loss.reason.as_str()),
+            Some("missing HEVC RTP marker or packets")
+        );
+    }
+
+    #[test]
+    fn incomplete_frame_gets_repair_time_during_a_received_burst() {
+        let now = Instant::now();
+        let mut assembler = Assembler::new();
+        assembler.previous = Some(9);
+        let mut first = picture(10, 1000);
+        first.marker = false;
+        assembler.push(first, now).unwrap();
+        for index in 12..28 {
+            assembler
+                .push(picture(index, index as u32 * 100), now)
+                .unwrap();
+        }
+
+        let poll = now + Duration::from_millis(10);
+        assert_eq!(assembler.pending(), 17);
+        assert!(assembler.ready(poll).unwrap().is_empty());
+        assert_eq!(assembler.missing(poll), vec![11]);
+        assert!(assembler.take_loss().is_none());
+    }
+
+    #[test]
+    fn missing_marker_expiry_preserves_the_next_complete_frame() {
+        let now = Instant::now();
+        let mut assembler = Assembler::new();
+        assembler.previous = Some(9);
+        let mut first = picture(10, 100);
+        first.marker = false;
+        assembler.push(first, now).unwrap();
+        assembler.push(picture(12, 200), now).unwrap();
+
+        let units = assembler.ready(now + Duration::from_millis(160)).unwrap();
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].timestamp, 200);
+        assert!(assembler.take_loss().is_some());
+    }
+
+    #[test]
+    fn repair_window_keeps_the_previous_memory_budget() {
+        let now = Instant::now();
+        let mut assembler = Assembler::new();
+        for index in 10..18 {
+            let timestamp = index as u32 * 100;
+            assembler.push(picture(index, timestamp), now).unwrap();
+            assembler.groups.get_mut(&timestamp).unwrap().bytes = MAX_UNIT;
+        }
+
+        assert!(assembler.push(picture(18, 1800), now).is_err());
+        assert_eq!(assembler.pending(), 8);
+    }
+
+    #[test]
+    fn overflowing_window_preserves_bounded_packet_metadata() {
+        let now = Instant::now();
+        let mut assembler = Assembler::new();
+        assembler.previous = Some(9);
+        for index in 10..11 + 2 * MAX_GROUPS as u64 {
+            assembler
+                .push(picture(index, index as u32 * 100), now)
+                .unwrap();
+        }
+
+        let loss = assembler.take_loss().unwrap();
+        assert_eq!(loss.reason, "HEVC packet window exceeded its limit");
+        assert_eq!(loss.previous, Some(9));
+        assert_eq!(loss.groups.len(), MAX_GROUPS);
+        for (offset, group) in loss.groups.iter().enumerate() {
+            let index = 10 + offset as u64;
+            assert_eq!(group.first, index);
+            assert_eq!(group.last, index);
+            assert_eq!(group.end, Some(index));
+            assert_eq!(group.packets, 1);
+            assert_eq!(group.age_ms, 0);
+            assert_eq!(group.nal_type, 1);
+            assert_eq!(group.fragment_start, None);
+        }
+        let value = serde_json::to_value(&loss).unwrap();
+        assert_eq!(value["groups"].as_array().unwrap().len(), MAX_GROUPS);
+    }
+
+    #[test]
+    fn late_packet_for_an_expired_frame_does_not_block_new_frames() {
+        let now = Instant::now();
+        let mut assembler = Assembler::new();
+        assembler.previous = Some(9);
+        let mut first = picture(10, 100);
+        first.marker = false;
+        assembler.push(first, now).unwrap();
+        assembler.push(picture(12, 100), now).unwrap();
+        let poll = now + Duration::from_millis(160);
+        assert!(assembler.ready(poll).unwrap().is_empty());
+        assert!(assembler.take_loss().is_some());
+
+        let mut retransmission = picture(11, 100);
+        retransmission.marker = false;
+        assembler.push(retransmission, poll).unwrap();
+        assembler.push(picture(13, 200), poll).unwrap();
+        let units = assembler.ready(poll + Duration::from_millis(4)).unwrap();
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].timestamp, 200);
+        assert_eq!(assembler.pending(), 0);
+        assert!(assembler.take_loss().is_none());
+    }
+
+    #[test]
+    fn frames_follow_packet_sequence_across_timestamp_rollover() {
+        let now = Instant::now();
+        let mut assembler = Assembler::new();
+        assembler.previous = Some(9);
+        assembler.push(picture(10, u32::MAX - 100), now).unwrap();
+        assembler.push(picture(11, 50), now).unwrap();
+
+        let poll = now + Duration::from_millis(10);
+        assert!(assembler.missing(poll).is_empty());
+        let units = assembler.ready(poll).unwrap();
+        assert_eq!(units.len(), 2);
+        assert_eq!(units[0].timestamp, i64::from(u32::MAX - 100));
+        assert_eq!(units[1].timestamp, 50);
+        assert!(assembler.take_loss().is_none());
+    }
 
     #[test]
     fn apple_donl_is_removed_from_every_fragment() {

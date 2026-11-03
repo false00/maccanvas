@@ -114,7 +114,7 @@ fn media_answer() -> Vec<u8> {
     combined.extend_from_slice(&[17; 92]);
     combined.extend_from_slice(&plist);
     plist = combined;
-    let mut message = vec![0, 0, 0, 2];
+    let mut message = vec![0, 0, 0, 3];
     message.extend_from_slice(&[0; 8]);
     message.extend_from_slice(&1105_i32.to_be_bytes());
     message.extend_from_slice(&20_u16.to_be_bytes());
@@ -129,6 +129,14 @@ fn media_answer() -> Vec<u8> {
     message.extend_from_slice(&1010_i32.to_be_bytes());
     message.extend_from_slice(&(plist.len() as u16).to_be_bytes());
     message.extend_from_slice(&plist);
+    let mut cursor = ZlibEncoder::new(Vec::new(), Compression::default());
+    cursor.write_all(&[3, 2, 1, 0, 255]).unwrap();
+    let cursor = cursor.finish().unwrap();
+    message.extend_from_slice(&[0, 0, 0, 0, 0, 1, 0, 1]);
+    message.extend_from_slice(&1104_i32.to_be_bytes());
+    message.extend_from_slice(&1000_u32.to_be_bytes());
+    message.extend_from_slice(&(cursor.len() as u32).to_be_bytes());
+    message.extend_from_slice(&cursor);
     message
 }
 
@@ -323,12 +331,21 @@ fn encrypted_apple_peer_decodes_real_hevc_and_preserves_input_and_hello_gates() 
     )
     .unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
+    let mut cursor_seen = false;
     loop {
         match receiver
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
             .unwrap()
             .1
         {
+            Event::Cursor {
+                update: super::cursor::Update::Image(cursor),
+                point_scale,
+            } => {
+                assert_eq!(cursor.rgba, [1, 2, 3, 255]);
+                assert_eq!(point_scale, 2.0);
+                cursor_seen = true;
+            }
             Event::Connected {
                 server_name,
                 credentials_saved,
@@ -342,6 +359,10 @@ fn encrypted_apple_peer_decodes_real_hevc_and_preserves_input_and_hello_gates() 
             _ => (),
         }
     }
+    assert!(
+        cursor_seen,
+        "The initial cursor must survive negotiation and reach the UI event queue"
+    );
     let frame = loop {
         if let Some(frame) = frames.lock().unwrap().clone() {
             break frame;

@@ -35,6 +35,10 @@ pub enum Event {
     },
     Warning(String),
     Audio(crate::audio::Status),
+    Cursor {
+        update: crate::apple_hps::cursor::Update,
+        point_scale: f32,
+    },
     Error(String),
     Disconnected,
 }
@@ -54,6 +58,8 @@ pub struct Request {
 struct Control {
     cancelled: AtomicBool,
     socket: Mutex<Option<TcpStream>>,
+    gpu_frame: Mutex<Option<Arc<crate::render::gpu::nvdec::Frame>>>,
+    frame_notifier: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     clipboard_enabled: AtomicBool,
     clipboard_utf8: AtomicBool,
     clipboard_pending: AtomicUsize,
@@ -65,6 +71,8 @@ impl Control {
         Self {
             cancelled: AtomicBool::new(false),
             socket: Mutex::new(None),
+            gpu_frame: Mutex::new(None),
+            frame_notifier: Mutex::new(None),
             clipboard_enabled: AtomicBool::new(clipboard),
             clipboard_utf8: AtomicBool::new(false),
             clipboard_pending: AtomicUsize::new(0),
@@ -110,6 +118,25 @@ enum WriterCommand {
 }
 
 impl Session {
+    pub fn set_frame_notifier(&self, notifier: Arc<dyn Fn() + Send + Sync>) -> Result<()> {
+        *self
+            .control
+            .frame_notifier
+            .lock()
+            .map_err(|_| Error::Display("Frame notification is unavailable".into()))? =
+            Some(notifier);
+        Ok(())
+    }
+
+    pub fn take_gpu_frame(&self) -> Result<Option<Arc<crate::render::gpu::nvdec::Frame>>> {
+        Ok(self
+            .control
+            .gpu_frame
+            .lock()
+            .map_err(|_| Error::Display("GPU frame queue is unavailable".into()))?
+            .take())
+    }
+
     pub fn start(request: Request, events: Sender<(u64, Event)>, frames: Frames) -> Result<Self> {
         request
             .streaming

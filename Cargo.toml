@@ -1,6 +1,6 @@
 [package]
 name = "maccanvas"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 rust-version = "1.92"
 license = "AGPL-3.0-or-later"
@@ -39,10 +39,10 @@ subtle = "2"
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "net", "time", "io-util", "sync", "macros"] }
 tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
-slint = { version = "1.18", default-features = false, features = ["std", "backend-winit", "renderer-software", "raw-window-handle-06", "accessibility", "compat-1-18"] }
+slint = { version = "1.18", default-features = false, features = ["std", "backend-winit", "renderer-femtovg", "renderer-software", "raw-window-handle-06", "accessibility", "compat-1-18"] }
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
-windows = { version = "0.62", features = ["Foundation", "Security_Credentials_UI", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Credentials", "Win32_Networking_WinHttp", "Win32_System_Com", "Win32_System_WinRT", "Win32_System_Registry", "Win32_System_Diagnostics_ToolHelp", "Win32_System_SystemInformation", "Win32_System_IO", "Win32_UI_Accessibility", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_Threading", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_Storage_FileSystem", "Win32_System_JobObjects"] }
+windows = { version = "0.62", features = ["Foundation", "Security_Credentials_UI", "Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Media_MediaFoundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Credentials", "Win32_Networking_WinHttp", "Win32_System_Com", "Win32_System_WinRT", "Win32_System_Registry", "Win32_System_Diagnostics_ToolHelp", "Win32_System_SystemInformation", "Win32_System_IO", "Win32_UI_Accessibility", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_Threading", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_Storage_FileSystem", "Win32_System_JobObjects"] }
 windows-future = "0.3"
 wasapi = "0.26"
 url = "2"
@@ -50,6 +50,7 @@ zeroize = { version = "1", features = ["derive"] }
 zune-jpeg = "0.5"
 
 [build-dependencies]
+cc = "1.2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 slint-build = "1.18"
 winresource = "0.1"
@@ -58,6 +59,9 @@ resvg = { version = "0.48", default-features = false }
 [dev-dependencies]
 jpeg-encoder = "0.6"
 windows = { version = "0.62", features = ["Win32_System_StationsAndDesktops", "Win32_Graphics_Gdi"] }
+
+[profile.dev.package.native-hevc]
+opt-level = 3
 
 [profile.release]
 lto = "thin"

@@ -11,6 +11,11 @@ use fast_image_resize::{
     images::{Image, ImageRef},
 };
 
+pub mod gpu;
+mod pacing;
+
+pub use pacing::Pacer;
+
 use crate::{
     error::{Error, Result},
     framebuffer::Framebuffer,

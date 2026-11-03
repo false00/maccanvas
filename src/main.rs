@@ -3,6 +3,14 @@
 slint::include_modules!();
 mod app;
 
+#[allow(non_upper_case_globals)]
+#[unsafe(no_mangle)]
+pub static NvOptimusEnablement: u32 = 1;
+
+#[allow(non_upper_case_globals)]
+#[unsafe(no_mangle)]
+pub static AmdPowerXpressRequestHighPerformance: u32 = 1;
+
 fn start() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = std::env::args().skip(1);
     let mut data_directory = None;
@@ -32,6 +40,13 @@ fn start() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 return Ok(());
             }
+            "--video-info" => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&maccanvas::render::gpu::report()?)?
+                );
+                return Ok(());
+            }
             "--verify-log" => {
                 let paths: Vec<_> = arguments.map(std::path::PathBuf::from).collect();
                 if paths.is_empty() {
@@ -45,7 +60,7 @@ fn start() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--help" | "-h" => {
                 println!(
-                    "MacCanvas {}\n\nUsage: maccanvas.exe [--data-dir DIRECTORY]\n       maccanvas.exe --version\n       maccanvas.exe --licenses\n       maccanvas.exe --audio-component-info\n       maccanvas.exe --verify-log FILE [FILE...]\n\nPasswords are entered in the window, never on the command line.",
+                    "MacCanvas {}\n\nUsage: maccanvas.exe [--data-dir DIRECTORY]\n       maccanvas.exe --version\n       maccanvas.exe --licenses\n       maccanvas.exe --audio-component-info\n       maccanvas.exe --video-info\n       maccanvas.exe --verify-log FILE [FILE...]\n\nPasswords are entered in the window, never on the command line.",
                     maccanvas::VERSION
                 );
                 return Ok(());

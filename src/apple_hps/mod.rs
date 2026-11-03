@@ -3,6 +3,7 @@ mod audio;
 mod bplist;
 mod control;
 mod crypto;
+pub mod cursor;
 mod offers;
 mod rtp;
 #[cfg(test)]
@@ -38,6 +39,20 @@ use offers::Offers;
 use rtp::Assembler;
 
 pub const COUNTER_ENCODING: i32 = -26_500;
+
+pub enum Frame {
+    Software(Framebuffer),
+    Gpu(Arc<crate::render::gpu::nvdec::Frame>),
+}
+
+impl Frame {
+    pub fn size(&self) -> Extent {
+        match self {
+            Self::Software(frame) => frame.size,
+            Self::Gpu(frame) => frame.size,
+        }
+    }
+}
 
 fn failed(message: impl std::fmt::Display) -> Error {
     Error::Protocol(format!("HEVC screen sharing: {message}"))
@@ -86,6 +101,7 @@ pub struct Client {
     feedback: Srtcp,
     heartbeat: SrtpSender,
     decoder: native_hevc::Decoder,
+    hardware: Option<crate::render::gpu::nvdec::Decoder>,
     assembler: Assembler,
     counters: Arc<Counters>,
     scope: Scope,
@@ -104,10 +120,9 @@ pub struct Client {
     last_fir: Instant,
     last_nack: Instant,
     last_frame: Instant,
-    last_publish: Instant,
+    pacer: crate::render::Pacer<Frame>,
     last_packet: Instant,
     started: Instant,
-    frame_limit: Duration,
     fps_ceiling: u16,
     last_recovery: Instant,
     decoded: u64,
@@ -128,6 +143,7 @@ impl Client {
         maximum_fps: u16,
         scope: Scope,
         audio_settings: AudioSettings,
+        prefer_hardware: bool,
     ) -> Result<Self> {
         if !(1..=120).contains(&maximum_fps) {
             return Err(failed("maximum FPS must be 1-120"));
@@ -230,6 +246,33 @@ impl Client {
         let feedback = Srtcp::new(&offers.video_send);
         let heartbeat = SrtpSender::new(&offers.audio_send, offers.audio_ssrc);
         let decoder = native_hevc::Decoder::new().map_err(failed)?;
+        let mut hardware = None;
+        if prefer_hardware && crate::render::gpu::hardware_enabled()? {
+            match crate::render::gpu::adapters() {
+                Ok(adapters) => {
+                    for adapter in adapters
+                        .into_iter()
+                        .filter(|adapter| adapter.vendor_id == 0x10de && adapter.hevc_444)
+                    {
+                        match crate::render::gpu::nvdec::Decoder::new(adapter.index) {
+                            Ok(selected) => {
+                                scope.event("media.hevc.hardware.selected", Level::Info,
+                                    json!({"media.decoder":"nvdec","gpu.adapter.name":adapter.name}))?;
+                                hardware = Some(selected);
+                                break;
+                            }
+                            Err(error) => scope.event("media.hevc.hardware.unavailable", Level::Info,
+                                json!({"media.decoder":"libde265","error.message":error.to_string()}))?,
+                        }
+                    }
+                }
+                Err(error) => scope.event(
+                    "media.hevc.hardware.unavailable",
+                    Level::Info,
+                    json!({"error.message":error.to_string()}),
+                )?,
+            }
+        }
         let now = Instant::now();
         let mut client = Self {
             info,
@@ -248,6 +291,7 @@ impl Client {
             feedback,
             heartbeat,
             decoder,
+            hardware,
             assembler: Assembler::new(),
             counters,
             scope,
@@ -266,12 +310,11 @@ impl Client {
             last_fir: now - Duration::from_secs(1),
             last_nack: now,
             last_frame: now,
-            last_publish: now - Duration::from_secs(1),
+            pacer: crate::render::Pacer::new(
+                maximum_fps.min(if sixty_fps { 60 } else { 30 }).max(1),
+            ),
             last_packet: now,
             started: now,
-            frame_limit: Duration::from_secs_f64(
-                1.0 / f64::from(maximum_fps.min(if sixty_fps { 60 } else { 30 }).max(1)),
-            ),
             fps_ceiling: if sixty_fps { 60 } else { 30 },
             last_recovery: now - Duration::from_secs(1),
             decoded: 0,
@@ -336,6 +379,12 @@ impl Client {
         }
     }
 
+    pub fn cursor_status(&mut self) -> Option<(cursor::Update, f32)> {
+        self.channel
+            .take_cursor()
+            .map(|cursor| (cursor, self.backing.width as f32 / self.scaled.width as f32))
+    }
+
     pub fn input(&mut self, command: Command) -> Result<()> {
         match command {
             Command::Audio(settings) => {
@@ -364,9 +413,7 @@ impl Client {
                         "reconnect before changing the HEVC preset or transport",
                     ));
                 }
-                self.frame_limit = Duration::from_secs_f64(
-                    1.0 / f64::from(settings.max_fps.min(self.fps_ceiling)),
-                );
+                self.pacer.set_fps(settings.max_fps.min(self.fps_ceiling));
                 Ok(())
             }
             other => self.channel.input(other, self.scaled, self.backing),
@@ -395,6 +442,7 @@ impl Client {
 
     fn recovery(&mut self, reason: &str) -> Result<()> {
         self.need_keyframe = true;
+        self.pacer.clear();
         if self.last_recovery.elapsed() < Duration::from_millis(300) {
             return Ok(());
         }
@@ -405,6 +453,16 @@ impl Client {
             json!({"media.recovery.reason":reason}),
         )?;
         self.decoder = native_hevc::Decoder::new().map_err(failed)?;
+        if let Some(hardware) = self.hardware.as_mut()
+            && let Err(error) = hardware.reset()
+        {
+            self.scope.event(
+                "media.hevc.hardware.fallback",
+                Level::Warn,
+                json!({"media.decoder":"libde265","error.message":error.to_string()}),
+            )?;
+            self.hardware = None;
+        }
         self.need_keyframe = true;
         self.request_keyframe()
     }
@@ -479,7 +537,44 @@ impl Client {
         self.start_audio()
     }
 
-    pub fn poll(&mut self) -> Result<Option<Framebuffer>> {
+    fn decode_video(&mut self, unit: &rtp::Unit) -> Result<Vec<Frame>> {
+        if let Some(hardware) = self.hardware.as_mut() {
+            match hardware.push(&unit.annex_b, unit.timestamp) {
+                Ok(frames) => return Ok(frames.into_iter().map(Frame::Gpu).collect()),
+                Err(error) => {
+                    self.scope.event(
+                        "media.hevc.hardware.fallback",
+                        Level::Warn,
+                        json!({"media.decoder":"libde265","error.message":error.to_string()}),
+                    )?;
+                    self.hardware = None;
+                    self.decoder = native_hevc::Decoder::new().map_err(failed)?;
+                    self.need_keyframe = !unit.random_access;
+                    if self.need_keyframe {
+                        self.request_keyframe()?;
+                        return Ok(Vec::new());
+                    }
+                }
+            }
+        }
+        self.decoder
+            .push(&unit.annex_b, unit.timestamp)
+            .map_err(failed)?
+            .into_iter()
+            .map(|frame| {
+                let size = Extent::new(frame.width, frame.height)?;
+                if frame.rgba.len() != size.bytes() {
+                    return Err(failed("decoder returned an invalid RGBA frame"));
+                }
+                Ok(Frame::Software(Framebuffer {
+                    size,
+                    rgba: frame.rgba,
+                }))
+            })
+            .collect()
+    }
+
+    pub fn poll(&mut self) -> Result<Option<Frame>> {
         let now = Instant::now();
         let stats_interval = if self.decoded == 0 { 3 } else { 60 };
         if self.last_stats.elapsed() >= Duration::from_secs(stats_interval) {
@@ -532,8 +627,12 @@ impl Client {
         while let Some(packet) = self.early.pop_front() {
             self.media(&packet, now)?;
         }
+        let mut units = self.assembler.ready(now)?;
         let mut buffer = [0; 65_536];
         for _ in 0..1024 {
+            if !units.is_empty() {
+                break;
+            }
             match self.video_socket.recv_from(&mut buffer) {
                 Ok((length, peer)) if peer == self.video_peer => {
                     self.counters
@@ -548,6 +647,7 @@ impl Client {
                 Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
                 Err(error) => return Err(error.into()),
             }
+            units.extend(self.assembler.ready(Instant::now())?);
         }
         if self.audio.as_ref().is_none_or(|audio| !audio.receiving()) {
             for _ in 0..128 {
@@ -608,6 +708,7 @@ impl Client {
             self.request_keyframe()?;
         }
         if self.last_feedback.elapsed() >= Duration::from_secs(1) {
+            self.channel.send(&[3, 1, 0, 0, 0, 0, 0, 1, 0, 1])?;
             let mut report = rtp::sender_report(self.offers.video_ssrc)?;
             report.extend_from_slice(&rtp::report(
                 self.offers.video_ssrc,
@@ -647,11 +748,15 @@ impl Client {
             }
             self.last_nack = now;
         }
-        let units = self.assembler.ready(now)?;
-        if let Some(reason) = self.assembler.take_loss() {
-            self.recovery(&reason)?;
+        units.extend(self.assembler.ready(Instant::now())?);
+        if let Some(loss) = self.assembler.take_loss() {
+            self.scope.event(
+                "media.hevc.rtp.loss",
+                Level::Warn,
+                json!({"media.rtp.loss":&loss}),
+            )?;
+            self.recovery(&loss.reason)?;
         }
-        let mut latest = None;
         for unit in units {
             if self.need_keyframe && !unit.random_access {
                 continue;
@@ -659,18 +764,15 @@ impl Client {
             if unit.random_access {
                 self.need_keyframe = false;
             }
-            match self.decoder.push(&unit.annex_b, unit.timestamp) {
+            match self.decode_video(&unit) {
                 Ok(frames) => {
                     for frame in frames {
-                        let size = Extent::new(frame.width, frame.height)?;
+                        let size = frame.size();
                         if size != self.encoded {
                             return Err(failed(format!(
                                 "decoded picture {}x{} does not match the negotiated {}x{} canvas",
                                 size.width, size.height, self.encoded.width, self.encoded.height
                             )));
-                        }
-                        if frame.rgba.len() != size.bytes() {
-                            return Err(failed("decoder returned an invalid RGBA frame"));
                         }
                         self.backing = size;
                         self.decoded += 1;
@@ -678,13 +780,11 @@ impl Client {
                         self.counters
                             .encoding
                             .store(COUNTER_ENCODING, Ordering::Relaxed);
-                        if self.last_publish.elapsed() >= self.frame_limit {
-                            latest = Some(Framebuffer {
-                                size,
-                                rgba: frame.rgba,
-                            });
-                            self.last_publish = now;
-                        }
+                        self.counters.decoder.store(
+                            i32::from(matches!(&frame, Frame::Gpu(_))),
+                            Ordering::Relaxed,
+                        );
+                        self.pacer.submit(frame);
                     }
                 }
                 Err(error) => {
@@ -721,6 +821,6 @@ impl Client {
             }
             self.recovery("HEVC video is arriving without a complete picture")?;
         }
-        Ok(latest)
+        Ok(self.pacer.take(Instant::now()))
     }
 }

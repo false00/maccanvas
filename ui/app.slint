@@ -159,6 +159,16 @@ export component App inherits Window {
     in-out property <bool> confirm-delete: false;
     out property <float> canvas-width: canvas.width / 1px;
     out property <float> canvas-height: canvas.height / 1px;
+    in property <image> remote-cursor-image;
+    in property <bool> remote-cursor-ready: false;
+    in property <bool> remote-cursor-hidden: false;
+    in property <float> remote-cursor-width;
+    in property <float> remote-cursor-height;
+    in property <float> remote-cursor-hotspot-x;
+    in property <float> remote-cursor-hotspot-y;
+    in property <float> remote-cursor-scale: 1;
+    in property <float> remote-cursor-frame-width: 1;
+    private property <float> remote-cursor-zoom: Math.min(4, Math.max(0.125, root.remote-cursor-scale * root.draw-width / Math.max(1, root.remote-cursor-frame-width)));
 
     callback connect-requested();
     callback disconnect-requested();
@@ -178,6 +188,7 @@ export component App inherits Window {
     callback refresh-desktop();
     callback fullscreen-requested();
     callback canvas-resized();
+    callback video-frame-ready();
     callback pointer-event(float, float, PointerEvent);
     callback wheel-event(float, float, PointerScrollEvent);
     callback keyboard-event(KeyEvent, bool) -> bool;
@@ -462,14 +473,23 @@ export component App inherits Window {
                         key-pressed(event) => { return root.keyboard-event(event, true) ? EventResult.accept : EventResult.reject; }
                         key-released(event) => { return root.keyboard-event(event, false) ? EventResult.accept : EventResult.reject; }
                         changed has-focus => { if !self.has-focus { root.release-input(); } }
-                        TouchArea {
-                            enabled: root.connected; mouse-cursor: default;
+                        remote-pointer := TouchArea {
+                            private property <bool> over-video: self.mouse-x >= root.draw-left * 1px && self.mouse-y >= root.draw-top * 1px && self.mouse-x < (root.draw-left + root.draw-width) * 1px && self.mouse-y < (root.draw-top + root.draw-height) * 1px;
+                            enabled: root.connected;
+                            mouse-cursor: self.over-video && (root.remote-cursor-ready || root.remote-cursor-hidden) ? MouseCursor.none : MouseCursor.default;
                             pointer-event(event) => {
                                 if event.kind == PointerEventKind.down { remote-focus.focus(); }
                                 root.pointer-event(self.mouse-x / 1px, self.mouse-y / 1px, event);
                             }
                             scroll-event(event) => { root.wheel-event(self.mouse-x / 1px, self.mouse-y / 1px, event); return EventResult.accept; }
                         }
+                    }
+                    if root.connected && !root.modal-open && root.remote-cursor-ready && remote-pointer.has-hover && remote-pointer.over-video : Image {
+                        source: root.remote-cursor-image;
+                        x: remote-pointer.mouse-x - root.remote-cursor-hotspot-x * root.remote-cursor-zoom * 1px;
+                        y: remote-pointer.mouse-y - root.remote-cursor-hotspot-y * root.remote-cursor-zoom * 1px;
+                        width: root.remote-cursor-width * root.remote-cursor-zoom * 1px;
+                        height: root.remote-cursor-height * root.remote-cursor-zoom * 1px;
                     }
                     if root.immersive : Rectangle {
                         x: 12px; y: 12px; width: 310px; height: 40px;

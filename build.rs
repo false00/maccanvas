@@ -1,5 +1,6 @@
 fn main() {
     build_metadata();
+    build_gpu();
     println!("cargo:rerun-if-changed=assets/logo.svg");
     slint_build::compile_with_config(
         "ui/app.slint",
@@ -27,6 +28,29 @@ fn main() {
             )
             .compile()
             .expect("Windows resource compilation failed");
+    }
+
+    fn build_gpu() {
+        if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+            return;
+        }
+        println!("cargo:rerun-if-changed=native/gpu_hevc.cpp");
+        println!("cargo:rerun-if-changed=native/nvcodec");
+        cc::Build::new()
+            .cpp(true)
+            .std("c++17")
+            .static_crt(true)
+            .opt_level(2)
+            .warnings(false)
+            .define("NOMINMAX", "1")
+            .define("WIN32_LEAN_AND_MEAN", "1")
+            .flag("/EHsc")
+            .include("native/nvcodec")
+            .file("native/gpu_hevc.cpp")
+            .compile("maccanvas_gpu");
+        for library in ["d3d11", "dxgi", "d3dcompiler"] {
+            println!("cargo:rustc-link-lib={library}");
+        }
     }
 
     fn build_metadata() {

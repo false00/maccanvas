@@ -23,7 +23,7 @@ use crate::{
     telemetry::Metered,
 };
 
-use super::{crypto::Records, offers};
+use super::{crypto::Records, cursor, offers};
 
 const ENCODINGS: [i32; 13] = [
     1010, 1011, 1002, 6, 16, 1104, 1100, -223, 1101, 1105, 1107, 1109, 1110,
@@ -168,6 +168,8 @@ pub(super) struct Channel {
     output: VecDeque<Vec<u8>>,
     output_offset: usize,
     fallback: Decoder,
+    cursor_cache: cursor::Cache,
+    cursor: Option<cursor::Update>,
 }
 
 impl Channel {
@@ -250,9 +252,15 @@ impl Channel {
                 output: VecDeque::new(),
                 output_offset: 0,
                 fallback: Decoder::new(size),
+                cursor_cache: cursor::Cache::default(),
+                cursor: None,
             },
             ServerInfo { size, name },
         ))
+    }
+
+    pub fn take_cursor(&mut self) -> Option<cursor::Update> {
+        self.cursor.take()
     }
 
     pub fn send(&mut self, data: &[u8]) -> Result<()> {
@@ -404,9 +412,18 @@ impl Channel {
                             }
                         }
                         1104 => {
-                            let _id = integer(&mut reader)?;
+                            let id = integer(&mut reader)?;
                             let size = integer(&mut reader)? as usize;
-                            read_bytes(&mut reader, size, 1_048_576)?;
+                            let pixels = read_bytes(&mut reader, size, 1_048_576)?;
+                            let rectangle = [0, 2, 4, 6].map(|offset| {
+                                u16::from_be_bytes([header[offset], header[offset + 1]])
+                            });
+                            if let Some(cursor) =
+                                self.cursor_cache.receive(id, rectangle, &pixels)?
+                            {
+                                self.cursor = Some(cursor);
+                            }
+                            self.send(&[3, 1, 0, 0, 0, 0, 0, 1, 0, 1])?;
                         }
                         -223 => {
                             let size = Extent::new(
