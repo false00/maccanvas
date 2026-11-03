@@ -31,9 +31,13 @@ mod tests {
             .output()
             .unwrap();
         assert!(output.status.success());
-        let notices = String::from_utf8(output.stdout).unwrap();
-        assert!(notices.contains(include_str!("../LICENSE").trim()));
-        assert!(notices.contains(include_str!("../vendor/fdk-aac/NOTICE").trim()));
+        let notices = String::from_utf8(output.stdout)
+            .unwrap()
+            .replace("\r\n", "\n");
+        let glue_license = include_str!("../LICENSE").replace("\r\n", "\n");
+        let codec_license = include_str!("../vendor/fdk-aac/NOTICE").replace("\r\n", "\n");
+        assert!(notices.contains(glue_license.trim()));
+        assert!(notices.contains(codec_license.trim()));
         assert!(notices.contains("not linked into, or embedded in"));
     }
 
