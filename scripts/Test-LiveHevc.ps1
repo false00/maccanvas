@@ -130,6 +130,9 @@ try {
             if ($EnableAudio) { $modes += 'audio' }
             if ($ExerciseSwitching) { $modes += @('hevc60', 'auto', 'hevc30') }
             foreach ($mode in $modes) {
+                $expectedEncoding = if ($mode -ceq 'audio') {
+                    if ($Fps -eq 60) { 'hevc60' } else { 'hevc30' }
+                } else { $mode }
                 $before = @(Read-OwnedRecords).Count
                 if ($mode -ceq 'audio') {
                     & (Join-Path $PSScriptRoot 'Gui-Fixture.ps1') -ProcessId $process.Id -Action enable-audio
@@ -175,7 +178,7 @@ try {
                 $vaultRead = [Array]::IndexOf($names, 'credential.read.requested')
                 if ($closed -lt 0 -or $closed -ge $requested -or $consented -lt 0 -or $consented -ge $vaultRead -or
                     $requests.Count -ne 1 -or $requests[0].attributes.'profile.id' -cne $profile.id -or
-                    $requests[0].attributes.'rfb.streaming'.encoding -cne $mode) {
+                    $requests[0].attributes.'rfb.streaming'.encoding -cne $expectedEncoding) {
                     throw 'Automatic restart must close first, keep the same Mac, and obtain fresh Hello before reading the vault.'
                 }
                 Start-Sleep -Milliseconds 500
