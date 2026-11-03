@@ -279,13 +279,14 @@ export component App inherits Window {
             spacing: root.sidebar-open && !root.immersive ? 14px : 0px;
             sidebar := Rectangle {
                 width: root.sidebar-open && !root.immersive ? 320px : 0px;
+                border-radius: 20px;
                 clip: true;
                 background: transparent;
                 animate width { duration: root.motion-enabled ? 200ms : 0ms; easing: ease-in-out; }
                 GlassPanel {
                     width: 320px;
                     height: parent.height;
-                    radius: 20px;
+                    radius: sidebar.border-radius;
                     opacity: min(1, sidebar.width / 240px);
                     visible: sidebar.width > 1px;
                     ScrollView {
@@ -555,14 +556,18 @@ export component App inherits Window {
                     Button { text: "Close"; clicked => { root.help-open = false; root.quality-open = false; } }
                 }
                 if root.error-text != "" : Text { text: root.error-text; color: root.dark-theme ? #ff6961 : #b42318; wrap: word-wrap; font-size: 12px; }
-                ScrollView {
-                    if !root.help-open : VerticalLayout {
-                        spacing: 12px; padding-right: 8px;
+                if !root.help-open : ScrollView {
+                    horizontal-scrollbar-policy: always-off;
+                    content-width: self.visible-width;
+                    content-height: quality-content.preferred-height;
+                    quality-content := VerticalLayout {
+                        spacing: 12px; padding-left: 4px; padding-right: 16px;
                         Text { text: "Default: HEVC / H.265 at up to 60 FPS, with adaptive bitrate."; color: root.muted; font-size: 12px; wrap: word-wrap; }
                         Caption { text: "Streaming mode"; }
                         ComboBox {
                             accessible-label: "Streaming mode";
                             accessible-action-set-value(value) => { self.current-value = value; }
+                            height: 36px;
                             model: ["HEVC / H.265 - 60 FPS (default)", "HEVC / H.265 - 30 FPS", "Auto (lossless VNC)", "ZRLE (lossless)", "Tight (lossless)", "Tight + JPEG (lossy)", "Hextile (lossless)", "Zlib (lossless)", "Raw (uncompressed)", "RRE (legacy)", "CoRRE (legacy)"];
                             current-index <=> root.encoding-index;
                         }
@@ -584,14 +589,19 @@ export component App inherits Window {
                         }
                         Text { text: root.encoding-index < 2 ? "HEVC negotiates adaptive video over encrypted UDP. Compression, JPEG quality and the VNC bandwidth target do not apply. The limit below can reduce the local display rate. Apply reconnects automatically when changing transports or HEVC presets; saved logins require Windows Hello again." : "Automatic means no bandwidth target. A manual target spaces screen requests based on received bytes; bursts can exceed it. Apply reconnects automatically when switching to or from HEVC. Other VNC changes apply live."; color: root.muted; font-size: 12px; wrap: word-wrap; }
                         HorizontalLayout {
-                            Caption { text: "Maximum updates / second"; }
+                            Caption { text: "Frame rate limit"; }
                             LineEdit { accessible-label: "Maximum FPS"; width: 88px; text <=> root.max-fps; input-type: InputType.number; }
                         }
                         CheckBox { text: "Show live FPS counter"; checked <=> root.show-fps; toggled => { root.save-preferences(); } }
                         Text { text: "FPS counts unique desktop images submitted for display, not monitor refreshes. An idle desktop correctly reads 0 FPS. Traffic measures VNC, HEVC/audio SRTP and SSH payloads in bits/s, excluding TCP/UDP/VPN overhead."; color: root.muted; font-size: 11px; wrap: word-wrap; }
                     }
-                    if root.help-open : VerticalLayout {
-                        spacing: 16px; padding-right: 8px;
+                }
+                if root.help-open : ScrollView {
+                    horizontal-scrollbar-policy: always-off;
+                    content-width: self.visible-width;
+                    content-height: guide-content.preferred-height;
+                    guide-content := VerticalLayout {
+                        spacing: 16px; padding-right: 16px;
                         Text { text: root.estimate-context; color: root.muted; font-size: 12px; wrap: word-wrap; }
                         for codec in root.codec-guide : VerticalLayout {
                             spacing: 6px;

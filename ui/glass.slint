@@ -20,7 +20,7 @@ export component GlassPanel inherits Rectangle {
     drop-shadow-blur: GlassTheme.effects ? (raised ? 24px : 14px) : 0px;
     drop-shadow-color: GlassTheme.dark ? #00000066 : #00000012;
     if GlassTheme.effects : Rectangle {
-        x: root.radius / 2; y: 1px; width: max(0px, root.width - root.radius);
+        x: root.radius; y: 1px; width: max(0px, root.width - 2 * root.radius);
         height: 1px; background: GlassTheme.dark ? #ffffff22 : #ffffffe0;
     }
     @children
@@ -56,7 +56,7 @@ export component Button inherits Rectangle {
     accessible-enabled: root.enabled;
     accessible-action-default => { if root.enabled { root.clicked(); } }
     if !root.quiet && GlassTheme.effects : Rectangle {
-        x: root.border-radius / 2; y: 1px; width: root.width - root.border-radius;
+        x: root.border-radius; y: 1px; width: max(0px, root.width - 2 * root.border-radius);
         height: 1px; background: root.primary ? #ffffff45 : #ffffff25;
     }
     Rectangle {
