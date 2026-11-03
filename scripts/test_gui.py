@@ -525,7 +525,7 @@ def main(executable, native_messages=False, ssh_fixture_executable=None, cancel_
             assert after["streaming"]["max_fps"] == 60
             assert after["profiles"][0]["host"] == "127.0.0.1"
             assert after["profiles"][0]["port"] == fixture.port
-            print("PASS: HEVC30 defaults, automatic same-Mac restart, matching preset FPS, "
+            print("PASS: HEVC60 defaults, automatic same-Mac restart, matching preset FPS, "
                   + ("cancellation" if cancel_switch else "explicit negotiation failure")
                   + " and no retry loop")
         finally:

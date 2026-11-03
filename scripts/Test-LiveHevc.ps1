@@ -3,7 +3,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$Address,
     [string]$Application = '',
-    [ValidateSet(30, 60)][int]$Fps = 30,
+    [ValidateSet(30, 60)][int]$Fps = 60,
     [ValidateRange(1, 120)][int]$ObserveSeconds = 40,
     [ValidateRange(10, 240)][int]$HelloTimeoutSeconds = 240,
     [switch]$RequireAudio,
@@ -12,7 +12,7 @@ param(
     [switch]$KeepEvidence
 )
 $ErrorActionPreference = 'Stop'
-if ($ExerciseSwitching -and $Fps -ne 30) { throw 'Switching validation starts with the default 30 FPS preset.' }
+if ($ExerciseSwitching -and $Fps -ne 60) { throw 'Switching validation starts with the default 60 FPS preset.' }
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 if (-not $Application) {
@@ -128,7 +128,7 @@ try {
         if ($ExerciseSwitching -or $EnableAudio) {
             $modes = @()
             if ($EnableAudio) { $modes += 'audio' }
-            if ($ExerciseSwitching) { $modes += @('hevc60', 'auto', 'hevc30') }
+            if ($ExerciseSwitching) { $modes += @('hevc30', 'auto', 'hevc60') }
             foreach ($mode in $modes) {
                 $expectedEncoding = if ($mode -ceq 'audio') {
                     if ($Fps -eq 60) { 'hevc60' } else { 'hevc30' }

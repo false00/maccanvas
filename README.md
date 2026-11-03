@@ -71,10 +71,11 @@ Mac VNC screen and input traffic is not encrypted, even with Mac account login.
 ## Quality and statistics
 
 Open **Quality** before or during a connection. The default is **HEVC / H.265
-at up to 30 FPS**, with adaptive bitrate. Existing saved choices are preserved.
+at up to 60 FPS**, with adaptive bitrate. Existing saved choices are preserved.
 
-Supported methods: **ZRLE, Tight, Tight + JPEG, Hextile, Zlib, RRE, CoRRE, Raw**,
-plus CopyRect. The in-app guide explains CPU cost, image quality, and illustrative
+Methods are listed in recommended order: **HEVC 60, HEVC 30, Auto, ZRLE, Tight,
+Tight + JPEG, Hextile, Zlib, Raw, RRE, CoRRE**, with CopyRect available for VNC.
+The in-app guide explains CPU cost, image quality, and illustrative
 bandwidth ranges. The Mac can choose a fallback or ignore compression hints.
 Choose **30 FPS** for lower decoding load or **60 FPS** for smoother motion.
 HEVC uses **Mac account** login and needs a compatible Apple-silicon Mac
@@ -86,6 +87,23 @@ no Windows codec extension is required.
 The HEVC presets request different frame-rate ceilings, not fixed bitrates.
 Actual FPS depends on the Mac, network, and Windows decoding capacity. The VNC
 compression/JPEG and request-bandwidth controls do not apply to HEVC.
+
+### Client graphics support
+
+| Client GPU | HEVC 4:4:4 decoding | Requirements and verification |
+| --- | --- | --- |
+| NVIDIA discrete/laptop GPU | NVDEC preferred; D3D11 fallback | Compatible 8-bit 4:4:4 driver; verified on an RTX 4090 Laptop GPU. No CUDA toolkit required. |
+| Intel integrated or discrete GPU | D3D11 through Windows Media Foundation | Compatible 4:4:4 driver and the Windows HEVC decoder component; real 4K pixels and recovery verified on Intel UHD Graphics. |
+| AMD integrated or discrete GPU | The same vendor-neutral D3D11 path | Compatible 4:4:4 driver and the Windows HEVC decoder component. Selection/fallback is tested; physical AMD hardware has not been tested for this release. |
+| Missing/unsupported hardware decoder | Bundled libde265 CPU fallback | No Windows codec component is required for software decoding; GPU composition/scaling remains available where supported. |
+
+Integrated-only systems are supported; a discrete GPU is not required. Hardware
+decoding is selected only when the adapter supports the stream format, and D3D11
+output must remain decoder-bound AYUV 4:4:4 rather than silently dropping chroma.
+HEVC60 is a ceiling, not a 60 FPS guarantee: older GPUs/CPUs, 4K, and slower links
+may benefit from the HEVC30 preset. Run `--video-info` to inspect the installed
+adapters and decoder components; actual stream negotiation can still fall back.
+
 **Apply** reconnects the current Mac automatically when switching transports or
 HEVC presets; saved logins require fresh Windows Hello approval. Other quality
 changes apply live. H.264 playback is not supported.
@@ -176,9 +194,10 @@ cargo build --release --locked
 ```
 
 The pinned toolchain builds `target\x86_64-pc-windows-msvc\release\maccanvas.exe`.
-Rust + Slint with GPU rendering, automatic NVIDIA NVDEC decoding for supported
-8-bit HEVC 4:4:4 streams, a bundled libde265 software fallback, and static Microsoft C runtime.
-NVIDIA decoding uses the installed driver; no CUDA toolkit is required.
+Rust + Slint with GPU rendering, automatic NVIDIA NVDEC or cross-vendor D3D11
+decoding for supported 8-bit HEVC 4:4:4 streams, a bundled libde265 software
+fallback, and static Microsoft C runtime. D3D11 decoding uses the installed
+Windows HEVC decoder component; NVIDIA NVDEC does not need it or a CUDA toolkit.
 Windows releases are built and tested in GitHub Actions.
 
 Inspect adapter and decoder capabilities without connecting:
@@ -190,7 +209,9 @@ cargo run --release -- --video-info
 For fallback testing, set `$env:MACCANVAS_VIDEO_DECODER = 'software'` before
 launching; remove it with `Remove-Item Env:MACCANVAS_VIDEO_DECODER` to return to
 automatic selection. `SLINT_BACKEND=winit-software` selects software UI rendering.
-GPU decoding and color conversion use NVDEC and D3D11, followed by a readback for
+Use `MACCANVAS_VIDEO_DECODER=d3d11` to test the Intel/AMD-first D3D11 path on a
+hybrid system, or `MACCANVAS_VIDEO_DECODER=nvdec` to test NVIDIA NVDEC only.
+GPU decoding and color conversion use NVDEC or D3D11, followed by a readback for
 the Slint GPU renderer. Direct D3D11/OpenGL texture sharing is experimental and
 disabled by default after failing live presentation testing; it can be requested
 with `MACCANVAS_GPU_PRESENTATION=shared` for diagnostics only. Unsupported streams

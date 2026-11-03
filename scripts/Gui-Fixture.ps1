@@ -30,8 +30,8 @@ function Find-FixtureElement([string]$Name, $Type) {
 function Set-FixtureStreamMode([string]$Mode) {
     $labels = @{
         auto = 'Auto (lossless VNC)'
-        hevc30 = 'HEVC / H.265 - 30 FPS (default)'
-        hevc60 = 'HEVC / H.265 - 60 FPS'
+        hevc30 = 'HEVC / H.265 - 30 FPS'
+        hevc60 = 'HEVC / H.265 - 60 FPS (default)'
     }
     $combo = Find-FixtureElement 'Streaming mode' ([Windows.Automation.ControlType]::ComboBox)
     $value = $combo.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern)
@@ -325,8 +325,8 @@ public static class MacCanvasOwnedDialogInput {
             GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).Current.Value
         $defaultFps = (Find-FixtureElement 'Maximum FPS' ([Windows.Automation.ControlType]::Edit)).
             GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).Current.Value
-        if ($defaultMode -cne 'HEVC / H.265 - 30 FPS (default)' -or $defaultFps -cne '30') {
-            throw 'A fresh viewer must default to native HEVC at 30 FPS.'
+        if ($defaultMode -cne 'HEVC / H.265 - 60 FPS (default)' -or $defaultFps -cne '60') {
+            throw 'A fresh viewer must default to native HEVC at 60 FPS.'
         }
         Set-FixtureStreamMode 'auto'
         (Find-FixtureElement 'Apply' ([Windows.Automation.ControlType]::Button)).

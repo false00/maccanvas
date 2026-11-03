@@ -140,6 +140,7 @@ struct Frame {
   std::shared_ptr<Output> output;
   ComPtr<ID3D11Device> device;
   ComPtr<ID3D11DeviceContext> context;
+  ComPtr<IUnknown> source;
   uint32_t width = 0;
   uint32_t height = 0;
   int64_t timestamp = 0;
@@ -149,6 +150,7 @@ const char* shader_source = R"(
 Texture2D<float> luma : register(t0);
 Texture2D<float> blue : register(t1);
 Texture2D<float> red : register(t2);
+Texture2D<float4> packed : register(t3);
 SamplerState sample_state : register(s0);
 cbuffer Conversion : register(b0) { float4 factors; };
 struct Vertex { float4 position : SV_Position; float2 uv : TEXCOORD0; };
@@ -165,7 +167,134 @@ float4 pixel(Vertex input) : SV_Target {
   float3 rgb = float3(y + 1.5748 * cr, y - 0.1873242729306488 * cb - 0.4681242729306488 * cr, y + 1.8556 * cb);
   return float4(saturate(rgb / 255), 1);
 }
+float4 pixel_ayuv(Vertex input) : SV_Target {
+  float4 value = packed.Load(int3(int2(input.position.xy), 0));
+  float y = (value.z * 255 - factors.x) * factors.y;
+  float cb = (value.y * 255 - 128) * factors.z;
+  float cr = (value.x * 255 - 128) * factors.z;
+  float3 rgb = float3(y + 1.5748 * cr, y - 0.1873242729306488 * cb - 0.4681242729306488 * cr, y + 1.8556 * cb);
+  return float4(saturate(rgb / 255), 1);
+}
 )";
+
+struct Converter {
+  ComPtr<ID3D11Device> device;
+  ComPtr<ID3D11DeviceContext> context;
+  ComPtr<ID3D11Texture2D> input;
+  ComPtr<ID3D11ShaderResourceView> view;
+  ComPtr<ID3D11VertexShader> vertex;
+  ComPtr<ID3D11PixelShader> pixel;
+  ComPtr<ID3D11Buffer> constants;
+  std::vector<std::shared_ptr<Output>> pool;
+  uint32_t width = 0;
+  uint32_t height = 0;
+
+  explicit Converter(ID3D11Device* supplied) : device(supplied) {
+    if (!device) throw std::runtime_error("D3D11 conversion requires a device");
+    device->GetImmediateContext(&context);
+    ComPtr<ID3D10Multithread> protection;
+    checked(context.As(&protection), "ID3D10Multithread");
+    protection->SetMultithreadProtected(TRUE);
+    ComPtr<ID3DBlob> vertex_code;
+    ComPtr<ID3DBlob> pixel_code;
+    ComPtr<ID3DBlob> errors;
+    checked(D3DCompile(shader_source, std::strlen(shader_source), nullptr, nullptr, nullptr,
+                       "vertex", "vs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &vertex_code, &errors), "Compile D3D11 vertex shader");
+    checked(D3DCompile(shader_source, std::strlen(shader_source), nullptr, nullptr, nullptr,
+                       "pixel_ayuv", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &pixel_code, &errors), "Compile AYUV conversion shader");
+    checked(device->CreateVertexShader(vertex_code->GetBufferPointer(), vertex_code->GetBufferSize(), nullptr, &vertex), "CreateVertexShader");
+    checked(device->CreatePixelShader(pixel_code->GetBufferPointer(), pixel_code->GetBufferSize(), nullptr, &pixel), "CreatePixelShader");
+    D3D11_BUFFER_DESC buffer{};
+    buffer.ByteWidth = 16;
+    buffer.Usage = D3D11_USAGE_DEFAULT;
+    buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    checked(device->CreateBuffer(&buffer, nullptr, &constants), "CreateBuffer(AYUV conversion)");
+  }
+
+  std::unique_ptr<Frame> convert(ID3D11Texture2D* source, uint32_t subresource,
+                                uint32_t visible_width, uint32_t visible_height,
+                                bool full_range, IUnknown* sample) {
+    if (!source || visible_width == 0 || visible_height == 0 || visible_width > 8192 || visible_height > 8192 ||
+        static_cast<uint64_t>(visible_width) * visible_height > 16777216) {
+      throw std::runtime_error("D3D11 picture exceeds its dimension limit");
+    }
+    D3D11_TEXTURE2D_DESC source_description{};
+    source->GetDesc(&source_description);
+    if (source_description.Format != DXGI_FORMAT_AYUV || !(source_description.BindFlags & D3D11_BIND_DECODER) ||
+        source_description.Width < visible_width || source_description.Height < visible_height ||
+        subresource >= source_description.MipLevels * source_description.ArraySize) {
+      throw std::runtime_error("D3D11 output is not a hardware decoder-bound 4:4:4 AYUV surface");
+    }
+    if (!input || width != visible_width || height != visible_height) {
+      input.Reset();
+      view.Reset();
+      pool.clear();
+      width = visible_width;
+      height = visible_height;
+      D3D11_TEXTURE2D_DESC description{};
+      description.Width = width;
+      description.Height = height;
+      description.MipLevels = description.ArraySize = description.SampleDesc.Count = 1;
+      description.Format = DXGI_FORMAT_AYUV;
+      description.Usage = D3D11_USAGE_DEFAULT;
+      description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+      checked(device->CreateTexture2D(&description, nullptr, &input), "CreateTexture2D(AYUV conversion)");
+      D3D11_SHADER_RESOURCE_VIEW_DESC resource{};
+      resource.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+      resource.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+      resource.Texture2D.MipLevels = 1;
+      checked(device->CreateShaderResourceView(input.Get(), &resource, &view), "CreateShaderResourceView(AYUV)");
+    }
+    std::shared_ptr<Output> output;
+    for (auto& candidate : pool) {
+      if (candidate.use_count() == 1) { output = candidate; break; }
+    }
+    if (!output) {
+      if (pool.size() >= 6) return nullptr;
+      output = std::make_shared<Output>();
+      D3D11_TEXTURE2D_DESC description{};
+      description.Width = width;
+      description.Height = height;
+      description.MipLevels = description.ArraySize = description.SampleDesc.Count = 1;
+      description.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+      description.Usage = D3D11_USAGE_DEFAULT;
+      description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+      description.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
+      checked(device->CreateTexture2D(&description, nullptr, &output->texture), "CreateTexture2D(D3D11 RGBA)");
+      pool.push_back(output);
+    }
+    D3D11_BOX region{0, 0, 0, width, height, 1};
+    context->CopySubresourceRegion(input.Get(), 0, 0, 0, 0, source, subresource, &region);
+    ComPtr<ID3D11RenderTargetView> target;
+    checked(device->CreateRenderTargetView(output->texture.Get(), nullptr, &target), "CreateRenderTargetView(D3D11)");
+    float factors[] = {full_range ? 0.0f : 16.0f, full_range ? 1.0f : 255.0f / 219.0f,
+                       full_range ? 1.0f : 255.0f / 224.0f, 0};
+    context->UpdateSubresource(constants.Get(), 0, nullptr, factors, 0, 0);
+    D3D11_VIEWPORT viewport{0, 0, static_cast<float>(width), static_cast<float>(height), 0, 1};
+    context->RSSetViewports(1, &viewport);
+    context->OMSetRenderTargets(1, target.GetAddressOf(), nullptr);
+    context->IASetInputLayout(nullptr);
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context->VSSetShader(vertex.Get(), nullptr, 0);
+    context->PSSetShader(pixel.Get(), nullptr, 0);
+    context->PSSetConstantBuffers(0, 1, constants.GetAddressOf());
+    auto* resource = view.Get();
+    context->PSSetShaderResources(3, 1, &resource);
+    context->Draw(3, 0);
+    resource = nullptr;
+    context->PSSetShaderResources(3, 1, &resource);
+    context->OMSetRenderTargets(0, nullptr, nullptr);
+    context->Flush();
+    auto frame = std::make_unique<Frame>();
+    frame->output = std::move(output);
+    frame->device = device;
+    frame->context = context;
+    frame->source = sample;
+    frame->width = width;
+    frame->height = height;
+    return frame;
+  }
+};
 
 struct Decoder {
   Driver driver;
@@ -482,6 +611,26 @@ struct Decoder {
 }
 
 extern "C" {
+void* nhg_converter_new(void* device, char* error, size_t capacity) noexcept {
+  try { return new Converter(static_cast<ID3D11Device*>(device)); }
+  catch (const std::exception& failure) { message(error, capacity, failure.what()); }
+  catch (...) { message(error, capacity, "Cannot initialize D3D11 color conversion"); }
+  return nullptr;
+}
+
+void nhg_converter_free(void* converter) noexcept { delete static_cast<Converter*>(converter); }
+
+void* nhg_converter_frame(void* converter, void* texture, uint32_t subresource,
+                          uint32_t width, uint32_t height, int full_range, void* sample,
+                          char* error, size_t capacity) noexcept {
+  try {
+    return static_cast<Converter*>(converter)->convert(static_cast<ID3D11Texture2D*>(texture),
+        subresource, width, height, full_range != 0, static_cast<IUnknown*>(sample)).release();
+  } catch (const std::exception& failure) { message(error, capacity, failure.what()); }
+  catch (...) { message(error, capacity, "Cannot convert D3D11 hardware output"); }
+  return nullptr;
+}
+
 void* nhg_new(uint32_t adapter, char* error, size_t capacity) noexcept {
   try { return new Decoder(adapter); }
   catch (const std::exception& failure) { message(error, capacity, failure.what()); }

@@ -16,24 +16,24 @@ pub enum Encoding {
     Rre,
     Corre,
     Raw,
-    #[default]
     Hevc30,
+    #[default]
     Hevc60,
 }
 
 impl Encoding {
     pub const ALL: [Self; 11] = [
+        Self::Hevc60,
+        Self::Hevc30,
         Self::Auto,
         Self::Zrle,
         Self::Tight,
         Self::TightJpeg,
         Self::Hextile,
         Self::Zlib,
+        Self::Raw,
         Self::Rre,
         Self::Corre,
-        Self::Raw,
-        Self::Hevc30,
-        Self::Hevc60,
     ];
 
     pub fn is_hevc(self) -> bool {
@@ -112,10 +112,10 @@ impl Encoding {
                 "Raw: no pixel compression and the lowest compression CPU cost. Best only on fast trusted links; full-frame 4K motion can require several gigabits per second."
             }
             Self::Hevc30 => {
-                "Default: Apple High Performance HEVC/H.265 at up to 30 FPS. Lower stream and decoding load than 60 FPS; preserves the Mac's physical desktop. Requires Mac account login and UDP on the VNC port and the next port. A native decoder is bundled; no codec extension is needed. Apply reconnects automatically when needed. Use Files for encrypted clipboard."
+                "Apple High Performance HEVC/H.265 at up to 30 FPS. Lower stream and decoding load than 60 FPS; preserves the Mac's physical desktop. Requires Mac account login and UDP on the VNC port and the next port. A native decoder is bundled; no codec extension is needed. Apply reconnects automatically when needed. Use Files for encrypted clipboard."
             }
             Self::Hevc60 => {
-                "Apple High Performance HEVC/H.265 at up to 60 FPS. Smoother motion with higher CPU and bandwidth use. Uses the same physical Mac desktop, encrypted control and SRTP video, with bundled native decoding. Requires a compatible Mac, Mac account login and UDP on both media ports. Apply reconnects automatically when needed."
+                "Default: Apple High Performance HEVC/H.265 at up to 60 FPS. Smoother motion with higher decoding and bandwidth use. Uses the same physical Mac desktop, encrypted control and SRTP video, with native decoding and software fallback. Requires a compatible Mac, Mac account login and UDP on both media ports. Apply reconnects automatically when needed."
             }
         }
     }
@@ -134,11 +134,11 @@ pub struct StreamSettings {
 impl Default for StreamSettings {
     fn default() -> Self {
         Self {
-            encoding: Encoding::Hevc30,
+            encoding: Encoding::Hevc60,
             compression: 6,
             jpeg_quality: 8,
             target_kbps: 0,
-            max_fps: 30,
+            max_fps: 60,
         }
     }
 }
@@ -262,15 +262,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_are_hevc30_with_adaptive_bitrate() {
+    fn defaults_are_hevc60_with_adaptive_bitrate() {
         let settings = StreamSettings::default();
-        assert_eq!(settings.encoding, Encoding::Hevc30);
-        assert_eq!(Encoding::default(), Encoding::Hevc30);
-        assert_eq!(settings.max_fps, 30);
+        assert_eq!(settings.encoding, Encoding::Hevc60);
+        assert_eq!(Encoding::default(), Encoding::Hevc60);
+        assert_eq!(settings.max_fps, 60);
         assert_eq!(settings.target_kbps, 0);
         assert_eq!(settings.compression, 6);
         assert!(settings.encodings().is_err());
         settings.validate().unwrap();
+    }
+
+    #[test]
+    fn methods_are_ordered_by_recommendation_with_hevc_first() {
+        assert_eq!(
+            Encoding::ALL,
+            [
+                Encoding::Hevc60,
+                Encoding::Hevc30,
+                Encoding::Auto,
+                Encoding::Zrle,
+                Encoding::Tight,
+                Encoding::TightJpeg,
+                Encoding::Hextile,
+                Encoding::Zlib,
+                Encoding::Raw,
+                Encoding::Rre,
+                Encoding::Corre,
+            ]
+        );
+        for (index, encoding) in Encoding::ALL.into_iter().enumerate() {
+            assert_eq!(Encoding::from_index(index as i32).unwrap(), encoding);
+            assert_eq!(encoding.index(), index as i32);
+        }
     }
 
     #[test]
@@ -347,7 +371,7 @@ mod tests {
         assert!((settings.request_interval(100).as_secs_f64() - 1.0 / 30.0).abs() < 0.00001);
         assert_eq!(
             StreamSettings::default().request_interval(1_000_000),
-            Duration::from_secs_f64(1.0 / 30.0)
+            Duration::from_secs_f64(1.0 / 60.0)
         );
     }
 

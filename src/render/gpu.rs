@@ -23,8 +23,10 @@ use windows::{
 };
 
 use crate::error::{Error, Result};
+use crate::geometry::Extent;
 
 pub mod interop;
+pub mod mf;
 pub mod nvdec;
 
 const HEVC_MAIN_444: GUID = GUID::from_u128(0x4008018f_f537_4b36_98cf_61af8a2c1a33);
@@ -32,10 +34,10 @@ const HEVC_MAIN10_444: GUID = GUID::from_u128(0x0dabeffa_4458_4602_bc03_0795659d
 
 fn preference(value: Option<&str>) -> Result<bool> {
     match value {
-        None | Some("auto") => Ok(true),
+        None | Some("auto") | Some("d3d11") | Some("nvdec") => Ok(true),
         Some("software") => Ok(false),
         _ => Err(Error::Configuration(
-            "MACCANVAS_VIDEO_DECODER must be auto or software".into(),
+            "MACCANVAS_VIDEO_DECODER must be auto, d3d11, nvdec, or software".into(),
         )),
     }
 }
@@ -61,16 +63,124 @@ pub fn direct_sharing_enabled() -> bool {
     sharing_preference(std::env::var("MACCANVAS_GPU_PRESENTATION").ok().as_deref())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Backend {
+    Nvdec,
+    D3d11,
+}
+
+impl Backend {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Nvdec => "nvdec",
+            Self::D3d11 => "d3d11",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Candidate {
+    pub index: u32,
+    pub name: String,
+    pub backend: Backend,
+}
+
+fn candidate_order(adapters: &[Adapter], requested: Option<&str>) -> Vec<Candidate> {
+    let mut candidates = Vec::new();
+    if requested != Some("d3d11") && requested != Some("software") {
+        candidates.extend(
+            adapters
+                .iter()
+                .filter(|adapter| {
+                    adapter.vendor_id == 0x10de && adapter.hevc_444 && adapter.error.is_none()
+                })
+                .map(|adapter| Candidate {
+                    index: adapter.index,
+                    name: adapter.name.clone(),
+                    backend: Backend::Nvdec,
+                }),
+        );
+    }
+    if requested != Some("nvdec") && requested != Some("software") {
+        for vendors in [&[0x8086, 0x1002][..], &[0x10de][..]] {
+            candidates.extend(
+                adapters
+                    .iter()
+                    .filter(|adapter| {
+                        vendors.contains(&adapter.vendor_id)
+                            && adapter.hevc_444
+                            && adapter.error.is_none()
+                    })
+                    .map(|adapter| Candidate {
+                        index: adapter.index,
+                        name: adapter.name.clone(),
+                        backend: Backend::D3d11,
+                    }),
+            );
+        }
+    }
+    candidates
+}
+
+pub fn candidates() -> Result<Vec<Candidate>> {
+    if !hardware_enabled()? {
+        return Ok(Vec::new());
+    }
+    let requested = std::env::var("MACCANVAS_VIDEO_DECODER").ok();
+    Ok(candidate_order(&adapters()?, requested.as_deref()))
+}
+
+pub enum Decoder {
+    Nvdec(nvdec::Decoder),
+    D3d11(mf::Decoder),
+}
+
+impl Decoder {
+    pub fn new(candidate: &Candidate, size: Extent) -> Result<Self> {
+        match candidate.backend {
+            Backend::Nvdec => nvdec::Decoder::new(candidate.index).map(Self::Nvdec),
+            Backend::D3d11 => mf::Decoder::new(candidate.index, size).map(Self::D3d11),
+        }
+    }
+
+    pub fn push(
+        &mut self,
+        data: &[u8],
+        timestamp: i64,
+    ) -> Result<Vec<std::sync::Arc<nvdec::Frame>>> {
+        match self {
+            Self::Nvdec(decoder) => decoder.push(data, timestamp),
+            Self::D3d11(decoder) => decoder.push(data, timestamp),
+        }
+    }
+
+    pub fn reset(&mut self) -> Result<()> {
+        match self {
+            Self::Nvdec(decoder) => decoder.reset(),
+            Self::D3d11(decoder) => decoder.reset(),
+        }
+    }
+
+    pub fn counter(&self) -> i32 {
+        match self {
+            Self::Nvdec(_) => 1,
+            Self::D3d11(_) => 2,
+        }
+    }
+}
+
 pub fn report() -> Result<serde_json::Value> {
     let adapters = adapters()?;
-    let hardware = adapters
-        .iter()
-        .filter(|adapter| adapter.vendor_id == 0x10de)
-        .map(|adapter| {
-            let result = nvdec::Decoder::new(adapter.index);
+    let requested = std::env::var("MACCANVAS_VIDEO_DECODER").ok();
+    let hardware = candidate_order(&adapters, requested.as_deref())
+        .into_iter()
+        .map(|candidate| {
+            let result = Decoder::new(&candidate, Extent::new(64, 48).expect("fixed probe size"));
             serde_json::json!({
-                "adapter_index":adapter.index,"adapter":adapter.name,"decoder":"nvdec",
+                "adapter_index":candidate.index,"adapter":candidate.name,"decoder":candidate.backend.name(),
                 "available":result.is_ok(),"error":result.err().map(|error| error.to_string()),
+                "stream_verification_required":candidate.backend == Backend::D3d11,
             })
         })
         .collect::<Vec<_>>();
@@ -176,6 +286,217 @@ pub fn adapters() -> Result<Vec<Adapter>> {
 
 #[cfg(test)]
 mod tests {
+    fn adapter(index: u32, vendor_id: u32, capable: bool) -> super::Adapter {
+        super::Adapter {
+            index,
+            name: format!("Adapter {index}"),
+            vendor_id,
+            device_id: index,
+            hevc_420: true,
+            hevc_420_10bit: true,
+            hevc_444: capable,
+            hevc_444_10bit: capable,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn integrated_only_systems_get_a_cross_vendor_decoder_candidate() {
+        for vendor in [0x8086, 0x1002] {
+            let candidates = super::candidate_order(&[adapter(0, vendor, true)], None);
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(candidates[0].backend, super::Backend::D3d11);
+        }
+        assert!(super::candidate_order(&[adapter(0, 0x8086, false)], None).is_empty());
+        assert!(super::candidate_order(&[adapter(0, 0x1002, true)], Some("software")).is_empty());
+    }
+
+    #[test]
+    fn hybrid_selection_preserves_nvdec_and_allows_integrated_only_testing() {
+        let adapters = [
+            adapter(0, 0x8086, true),
+            adapter(1, 0x10de, true),
+            adapter(2, 0x1002, true),
+        ];
+        let candidates = super::candidate_order(&adapters, None);
+        assert_eq!(
+            (candidates[0].index, candidates[0].backend),
+            (1, super::Backend::Nvdec)
+        );
+        assert_eq!(
+            (candidates[1].index, candidates[1].backend),
+            (0, super::Backend::D3d11)
+        );
+        assert_eq!(
+            (candidates[2].index, candidates[2].backend),
+            (2, super::Backend::D3d11)
+        );
+        let candidates = super::candidate_order(&adapters, Some("d3d11"));
+        assert_eq!(candidates[0].index, 0);
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.backend == super::Backend::D3d11)
+        );
+        let candidates = super::candidate_order(&adapters, Some("nvdec"));
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].index, 1);
+    }
+
+    #[test]
+    #[ignore = "manual integrated GPU HEVC 4:4:4 stream negotiation check"]
+    fn installed_integrated_transform_decodes_real_444() -> windows::core::Result<()> {
+        use std::{mem::ManuallyDrop, ptr};
+        use windows::Win32::{
+            Graphics::{
+                Direct3D::{
+                    D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
+                },
+                Direct3D11::{
+                    D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice,
+                    ID3D11Device,
+                },
+                Dxgi::{CreateDXGIFactory1, IDXGIFactory1},
+            },
+            Media::MediaFoundation::*,
+            System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize},
+        };
+        use windows::core::Interface;
+
+        let adapter = super::adapters()
+            .unwrap()
+            .into_iter()
+            .find(|adapter| matches!(adapter.vendor_id, 0x8086 | 0x1002))
+            .expect("Integrated Intel or AMD adapter");
+        unsafe {
+            CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
+            MFStartup(MF_VERSION, MFSTARTUP_FULL)?;
+            let result = (|| -> windows::core::Result<()> {
+                let factory: IDXGIFactory1 = CreateDXGIFactory1()?;
+                let adapter = factory.EnumAdapters1(adapter.index)?;
+                let mut device: Option<ID3D11Device> = None;
+                D3D11CreateDevice(
+                    &adapter,
+                    D3D_DRIVER_TYPE_UNKNOWN,
+                    super::HMODULE::default(),
+                    D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+                    Some(&[D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0]),
+                    D3D11_SDK_VERSION,
+                    Some(&mut device),
+                    None,
+                    None,
+                )?;
+                let device = device.unwrap();
+                let mut token = 0;
+                let mut manager = None;
+                MFCreateDXGIDeviceManager(&mut token, &mut manager)?;
+                let manager = manager.unwrap();
+                manager.ResetDevice(&device, token)?;
+                let filter = MFT_REGISTER_TYPE_INFO {
+                    guidMajorType: MFMediaType_Video,
+                    guidSubtype: MFVideoFormat_HEVC,
+                };
+                let mut activations = ptr::null_mut();
+                let mut count = 0;
+                MFTEnumEx(
+                    MFT_CATEGORY_VIDEO_DECODER,
+                    MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER,
+                    Some(&filter),
+                    None,
+                    &mut activations,
+                    &mut count,
+                )?;
+                assert!(count > 0 && count <= 128);
+                let entries = std::slice::from_raw_parts_mut(activations, count as usize);
+                let activation = entries[0].take().unwrap();
+                for entry in entries.iter_mut() {
+                    drop(entry.take());
+                }
+                CoTaskMemFree(Some(activations.cast()));
+                let transform: IMFTransform = activation.ActivateObject()?;
+                assert_eq!(transform.GetAttributes()?.GetUINT32(&MF_SA_D3D11_AWARE)?, 1);
+                transform.GetAttributes()?.SetUINT32(&MF_LOW_LATENCY, 1)?;
+                transform.ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, manager.as_raw() as usize)?;
+                let input = MFCreateMediaType()?;
+                input.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
+                input.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_HEVC_ES)?;
+                input.SetUINT64(&MF_MT_FRAME_SIZE, (64_u64 << 32) | 48)?;
+                input.SetUINT64(&MF_MT_FRAME_RATE, (60_u64 << 32) | 1)?;
+                input.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
+                input.SetUINT32(&MF_MT_MPEG2_PROFILE, 4)?;
+                transform.SetInputType(0, &input, 0)?;
+                let first = transform.GetOutputAvailableType(0, 0)?;
+                println!(
+                    "Initial integrated decoder output: {:?}",
+                    first.GetGUID(&MF_MT_SUBTYPE)?
+                );
+                transform.SetOutputType(0, &first, 0)?;
+                transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)?;
+                transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)?;
+                let data = include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/crates/native-hevc/tests/data/pattern444.hevc"
+                ));
+                let buffer = MFCreateMemoryBuffer(data.len() as u32)?;
+                let mut destination = ptr::null_mut();
+                buffer.Lock(&mut destination, None, None)?;
+                ptr::copy_nonoverlapping(data.as_ptr(), destination, data.len());
+                buffer.Unlock()?;
+                buffer.SetCurrentLength(data.len() as u32)?;
+                let sample = MFCreateSample()?;
+                sample.AddBuffer(&buffer)?;
+                sample.SetSampleTime(0)?;
+                sample.SetSampleDuration(10_000_000 / 60)?;
+                transform.ProcessInput(0, &sample, 0)?;
+                transform.ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0)?;
+                for _ in 0..8 {
+                    let mut output = MFT_OUTPUT_DATA_BUFFER::default();
+                    let mut status = 0;
+                    let result =
+                        transform.ProcessOutput(0, std::slice::from_mut(&mut output), &mut status);
+                    let sample = ManuallyDrop::take(&mut output.pSample);
+                    drop(ManuallyDrop::take(&mut output.pEvents));
+                    match result {
+                        Err(error) if error.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
+                            let mut selected = None;
+                            for index in 0..64 {
+                                let available = match transform.GetOutputAvailableType(0, index) {
+                                    Ok(available) => available,
+                                    Err(_) => break,
+                                };
+                                let subtype = available.GetGUID(&MF_MT_SUBTYPE)?;
+                                println!("Post-SPS integrated decoder output: {subtype:?}");
+                                if subtype == MFVideoFormat_AYUV {
+                                    selected = Some(available);
+                                }
+                            }
+                            let selected = selected.ok_or_else(|| windows::core::Error::new(MF_E_INVALIDMEDIATYPE,
+                                "The integrated Windows HEVC decoder exposes no 4:4:4 output after the real SPS"))?;
+                            transform.SetOutputType(0, &selected, 0)?;
+                        }
+                        Err(error) => return Err(error),
+                        Ok(()) => {
+                            let sample = sample.expect("Decoded sample");
+                            assert_eq!(
+                                transform.GetOutputCurrentType(0)?.GetGUID(&MF_MT_SUBTYPE)?,
+                                MFVideoFormat_AYUV
+                            );
+                            let _: IMFDXGIBuffer = sample.GetBufferByIndex(0)?.cast()?;
+                            activation.ShutdownObject()?;
+                            return Ok(());
+                        }
+                    }
+                }
+                Err(windows::core::Error::from_hresult(
+                    MF_E_TRANSFORM_NEED_MORE_INPUT,
+                ))
+            })();
+            MFShutdown()?;
+            CoUninitialize();
+            result
+        }
+    }
+
     #[test]
     fn unverified_direct_sharing_is_never_the_default() {
         assert!(!super::sharing_preference(None));
@@ -189,6 +510,8 @@ mod tests {
         assert!(super::preference(None).unwrap());
         assert!(super::preference(Some("auto")).unwrap());
         assert!(!super::preference(Some("software")).unwrap());
+        assert!(super::preference(Some("d3d11")).unwrap());
+        assert!(super::preference(Some("nvdec")).unwrap());
         assert!(super::preference(Some("unknown")).is_err());
     }
 

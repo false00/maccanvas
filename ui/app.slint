@@ -144,14 +144,14 @@ export component App inherits Window {
     in property <string> fps-text: "0 FPS";
     in property <[TrafficBar]> traffic;
     in property <string> active-encoding: "Waiting for pixels";
-    in-out property <int> encoding-index: 9;
+    in-out property <int> encoding-index: 0;
     in-out property <float> compression-level: 6;
     in-out property <float> jpeg-quality: 8;
     in-out property <bool> manual-bandwidth: false;
     in-out property <string> target-mbps: "10";
-    in-out property <string> max-fps: "30";
+    in-out property <string> max-fps: "60";
     in property <string> encoding-description;
-    in property <string> bandwidth-description: "Default: HEVC / H.265, adaptive bitrate, up to 30 FPS.";
+    in property <string> bandwidth-description: "Default: HEVC / H.265, adaptive bitrate, up to 60 FPS.";
     in property <[CodecGuide]> codec-guide;
     in property <string> estimate-context;
     in-out property <bool> quality-open: false;
@@ -558,31 +558,31 @@ export component App inherits Window {
                 ScrollView {
                     if !root.help-open : VerticalLayout {
                         spacing: 12px; padding-right: 8px;
-                        Text { text: "Default: HEVC / H.265 at up to 30 FPS, with adaptive bitrate."; color: root.muted; font-size: 12px; wrap: word-wrap; }
+                        Text { text: "Default: HEVC / H.265 at up to 60 FPS, with adaptive bitrate."; color: root.muted; font-size: 12px; wrap: word-wrap; }
                         Caption { text: "Streaming mode"; }
                         ComboBox {
                             accessible-label: "Streaming mode";
                             accessible-action-set-value(value) => { self.current-value = value; }
-                            model: ["Auto (lossless VNC)", "ZRLE (lossless)", "Tight (lossless)", "Tight + JPEG (lossy)", "Hextile (lossless)", "Zlib (lossless)", "RRE (legacy)", "CoRRE (legacy)", "Raw (uncompressed)", "HEVC / H.265 - 30 FPS (default)", "HEVC / H.265 - 60 FPS"];
+                            model: ["HEVC / H.265 - 60 FPS (default)", "HEVC / H.265 - 30 FPS", "Auto (lossless VNC)", "ZRLE (lossless)", "Tight (lossless)", "Tight + JPEG (lossy)", "Hextile (lossless)", "Zlib (lossless)", "Raw (uncompressed)", "RRE (legacy)", "CoRRE (legacy)"];
                             current-index <=> root.encoding-index;
                         }
                         Text { text: root.encoding-description; color: root.muted; font-size: 12px; wrap: word-wrap; }
                         Button { text: "Compare methods & bandwidth estimates"; clicked => { root.help-open = true; } }
-                        if root.encoding-index < 9 : HorizontalLayout {
+                        if root.encoding-index >= 2 : HorizontalLayout {
                             Caption { text: "Compression effort: " + round(root.compression-level); }
-                            Slider { accessible-label: "Compression effort"; minimum: 0; maximum: 9; step: 1; value <=> root.compression-level; enabled: root.encoding-index <= 3 || root.encoding-index == 5; }
+                            Slider { accessible-label: "Compression effort"; minimum: 0; maximum: 9; step: 1; value <=> root.compression-level; enabled: root.encoding-index <= 5 || root.encoding-index == 7; }
                         }
-                        if root.encoding-index < 9 : Text { text: "0 = less CPU, potentially more traffic. 9 = more CPU, potentially fewer bytes. This is a server hint, not a bitrate."; color: root.muted; font-size: 11px; wrap: word-wrap; }
-                        if root.encoding-index == 3 : HorizontalLayout {
+                        if root.encoding-index >= 2 : Text { text: "0 = less CPU, potentially more traffic. 9 = more CPU, potentially fewer bytes. This is a server hint, not a bitrate."; color: root.muted; font-size: 11px; wrap: word-wrap; }
+                        if root.encoding-index == 5 : HorizontalLayout {
                             Caption { text: "JPEG quality: " + round(root.jpeg-quality); }
                             Slider { accessible-label: "JPEG quality"; minimum: 0; maximum: 9; step: 1; value <=> root.jpeg-quality; }
                         }
-                        if root.encoding-index < 9 : CheckBox { text: "Use a manual bandwidth target"; checked <=> root.manual-bandwidth; }
-                        if root.manual-bandwidth && root.encoding-index < 9 : HorizontalLayout {
+                        if root.encoding-index >= 2 : CheckBox { text: "Use a manual bandwidth target"; checked <=> root.manual-bandwidth; }
+                        if root.manual-bandwidth && root.encoding-index >= 2 : HorizontalLayout {
                             Caption { text: "Target (Mbps)"; }
                             LineEdit { accessible-label: "Bandwidth target Mbps"; text <=> root.target-mbps; input-type: InputType.decimal; }
                         }
-                        Text { text: root.encoding-index >= 9 ? "HEVC negotiates adaptive video over encrypted UDP. Compression, JPEG quality and the VNC bandwidth target do not apply. The limit below can reduce the local display rate. Apply reconnects automatically when changing transports or HEVC presets; saved logins require Windows Hello again." : "Automatic means no bandwidth target. A manual target spaces screen requests based on received bytes; bursts can exceed it. Apply reconnects automatically when switching to or from HEVC. Other VNC changes apply live."; color: root.muted; font-size: 12px; wrap: word-wrap; }
+                        Text { text: root.encoding-index < 2 ? "HEVC negotiates adaptive video over encrypted UDP. Compression, JPEG quality and the VNC bandwidth target do not apply. The limit below can reduce the local display rate. Apply reconnects automatically when changing transports or HEVC presets; saved logins require Windows Hello again." : "Automatic means no bandwidth target. A manual target spaces screen requests based on received bytes; bursts can exceed it. Apply reconnects automatically when switching to or from HEVC. Other VNC changes apply live."; color: root.muted; font-size: 12px; wrap: word-wrap; }
                         HorizontalLayout {
                             Caption { text: "Maximum updates / second"; }
                             LineEdit { accessible-label: "Maximum FPS"; width: 88px; text <=> root.max-fps; input-type: InputType.number; }

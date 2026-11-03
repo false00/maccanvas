@@ -2106,8 +2106,12 @@ pub fn run(
                     .map(|session| session.counters.clone())
                 {
                     app.set_active_encoding(
-                        if counters.decoder.load(Ordering::Relaxed) == 1 {
-                            format!("{} | NVIDIA NVDEC", encoding_name(counters.encoding.load(Ordering::Relaxed))).into()
+                        if let Some(decoder) = match counters.decoder.load(Ordering::Relaxed) {
+                            1 => Some("NVIDIA NVDEC"),
+                            2 => Some("D3D11"),
+                            _ => None,
+                        } {
+                            format!("{} | {decoder}", encoding_name(counters.encoding.load(Ordering::Relaxed))).into()
                         } else {
                             encoding_name(counters.encoding.load(Ordering::Relaxed)).into()
                         },

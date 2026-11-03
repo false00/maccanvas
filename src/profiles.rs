@@ -271,17 +271,22 @@ mod tests {
     }
 
     #[test]
-    fn fresh_settings_use_hevc30_and_explicit_existing_choices_are_preserved() {
+    fn fresh_settings_use_hevc60_and_explicit_existing_choices_are_preserved() {
         use crate::streaming::Encoding;
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("settings.json");
         let fresh = Settings::load(&path).unwrap();
-        assert_eq!(fresh.streaming.encoding, Encoding::Hevc30);
-        assert_eq!(fresh.streaming.max_fps, 30);
-        for encoding in [Encoding::Auto, Encoding::Zrle, Encoding::Hevc60] {
+        assert_eq!(fresh.streaming.encoding, Encoding::Hevc60);
+        assert_eq!(fresh.streaming.max_fps, 60);
+        for (encoding, fps) in [
+            (Encoding::Auto, 60),
+            (Encoding::Zrle, 60),
+            (Encoding::Hevc30, 30),
+            (Encoding::Hevc60, 60),
+        ] {
             let mut existing = fresh.clone();
             existing.streaming.encoding = encoding;
-            existing.streaming.max_fps = 60;
+            existing.streaming.max_fps = fps;
             existing.save(&path).unwrap();
             assert_eq!(Settings::load(&path).unwrap().streaming, existing.streaming);
         }

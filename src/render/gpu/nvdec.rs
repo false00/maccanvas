@@ -122,6 +122,19 @@ unsafe impl Send for Frame {}
 unsafe impl Sync for Frame {}
 
 impl Frame {
+    pub(super) unsafe fn from_native(native: NonNull<c_void>) -> Result<Arc<Self>> {
+        let size = Extent::new(unsafe { nhg_frame_width(native.as_ptr()) }, unsafe {
+            nhg_frame_height(native.as_ptr())
+        });
+        match size {
+            Ok(size) => Ok(Arc::new(Self { native, size })),
+            Err(error) => {
+                unsafe { nhg_frame_free(native.as_ptr()) };
+                Err(error)
+            }
+        }
+    }
+
     pub fn texture(&self) -> ID3D11Texture2D {
         unsafe { ID3D11Texture2D::from_raw(nhg_frame_texture(self.native.as_ptr())) }
     }

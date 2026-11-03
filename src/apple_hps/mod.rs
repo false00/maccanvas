@@ -101,7 +101,7 @@ pub struct Client {
     feedback: Srtcp,
     heartbeat: SrtpSender,
     decoder: native_hevc::Decoder,
-    hardware: Option<crate::render::gpu::nvdec::Decoder>,
+    hardware: Option<crate::render::gpu::Decoder>,
     assembler: Assembler,
     counters: Arc<Counters>,
     scope: Scope,
@@ -248,21 +248,18 @@ impl Client {
         let decoder = native_hevc::Decoder::new().map_err(failed)?;
         let mut hardware = None;
         if prefer_hardware && crate::render::gpu::hardware_enabled()? {
-            match crate::render::gpu::adapters() {
-                Ok(adapters) => {
-                    for adapter in adapters
-                        .into_iter()
-                        .filter(|adapter| adapter.vendor_id == 0x10de && adapter.hevc_444)
-                    {
-                        match crate::render::gpu::nvdec::Decoder::new(adapter.index) {
+            match crate::render::gpu::candidates() {
+                Ok(candidates) => {
+                    for candidate in candidates {
+                        match crate::render::gpu::Decoder::new(&candidate, canvas) {
                             Ok(selected) => {
                                 scope.event("media.hevc.hardware.selected", Level::Info,
-                                    json!({"media.decoder":"nvdec","gpu.adapter.name":adapter.name}))?;
+                                    json!({"media.decoder":candidate.backend.name(),"gpu.adapter.name":candidate.name}))?;
                                 hardware = Some(selected);
                                 break;
                             }
                             Err(error) => scope.event("media.hevc.hardware.unavailable", Level::Info,
-                                json!({"media.decoder":"libde265","error.message":error.to_string()}))?,
+                                json!({"media.decoder":candidate.backend.name(),"gpu.adapter.name":candidate.name,"error.message":error.to_string()}))?,
                         }
                     }
                 }
@@ -781,7 +778,13 @@ impl Client {
                             .encoding
                             .store(COUNTER_ENCODING, Ordering::Relaxed);
                         self.counters.decoder.store(
-                            i32::from(matches!(&frame, Frame::Gpu(_))),
+                            if matches!(&frame, Frame::Gpu(_)) {
+                                self.hardware
+                                    .as_ref()
+                                    .map_or(0, |decoder| decoder.counter())
+                            } else {
+                                0
+                            },
                             Ordering::Relaxed,
                         );
                         self.pacer.submit(frame);
