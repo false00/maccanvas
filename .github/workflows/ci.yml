@@ -15,6 +15,11 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
       - name: Verify the native macOS Unicode clipboard helpers
         run: python3 scripts/test_macos_clipboard.py
+      - name: Verify native Apple audio conformance encoding
+        run: |
+          clang -std=c11 -O2 scripts/generate_macos_audio_fixture.c -framework AudioToolbox -framework AudioUnit -framework CoreAudio -o "$RUNNER_TEMP/native-audio-fixture"
+          cd "$RUNNER_TEMP"
+          ./native-audio-fixture stereo.aaceld
   check:
     runs-on: windows-latest
     steps:
@@ -29,11 +34,13 @@ jobs:
         run: |
           cargo fmt --all -- --check
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --all-targets --locked --package maccanvas --package native-hevc
+          cargo fmt --manifest-path crates\audio-codec-tool\Cargo.toml -- --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --all-targets --locked --package maccanvas --package native-hevc --package audio-codec-tool
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --test windows_clipboard --locked -- --ignored --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo clippy --all-targets --locked -- -D warnings
+          cargo clippy --all-targets --locked --package maccanvas --package audio-codec-tool -- -D warnings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           .\scripts\Test-Installer.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

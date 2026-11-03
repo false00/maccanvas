@@ -54,11 +54,11 @@ pub(super) struct Offers {
 }
 
 impl Offers {
-    pub fn new() -> Result<Self> {
-        Self::with_bank(false)
+    pub fn new(audio: bool) -> Result<Self> {
+        Self::with_bank(false, audio)
     }
 
-    pub fn with_bank(alternate: bool) -> Result<Self> {
+    pub fn with_bank(alternate: bool, audio: bool) -> Result<Self> {
         let audio_ssrc = random_u32()?;
         let video_ssrc = random_u32()?;
         let key = || -> Result<Zeroizing<[u8; 46]>> {
@@ -68,8 +68,8 @@ impl Offers {
             Ok(value)
         };
         Ok(Self {
-            audio: offer(false, audio_ssrc, alternate)?,
-            video: offer(true, video_ssrc, alternate)?,
+            audio: offer(false, audio_ssrc, alternate, audio)?,
+            video: offer(true, video_ssrc, alternate, audio)?,
             audio_ssrc,
             video_ssrc,
             audio_send: key()?,
@@ -105,7 +105,7 @@ impl Offers {
     }
 }
 
-fn offer(video: bool, session: u32, alternate: bool) -> Result<Vec<u8>> {
+fn offer(video: bool, session: u32, alternate: bool, audio: bool) -> Result<Vec<u8>> {
     let mut description = Vec::new();
     number(&mut description, 1, u64::from(session));
     if video {
@@ -136,7 +136,13 @@ fn offer(video: bool, session: u32, alternate: bool) -> Result<Vec<u8>> {
             number(&mut description, field, value);
         }
     } else {
-        for (field, value) in [(2, 0), (3, 0), (4, 1000), (5, 0), (6, 0)] {
+        for (field, value) in [
+            (2, 0),
+            (3, 0),
+            (4, if audio { 24191 } else { 1000 }),
+            (5, 0),
+            (6, 0),
+        ] {
             number(&mut description, field, value);
         }
     }
@@ -330,7 +336,7 @@ mod tests {
 
     #[test]
     fn offers_request_real_hevc_single_picture_and_suppress_audio() {
-        let offers = Offers::new().unwrap();
+        let offers = Offers::new(false).unwrap();
         assert_ne!(&*offers.video_send, &*offers.video_receive);
         let video = Value::from_reader(Cursor::new(&offers.video)).unwrap();
         let dict = video.as_dictionary().unwrap();

@@ -3,7 +3,7 @@
 # MacCanvas
 
 A lightweight Windows viewer for macOS Screen Sharing.
-One portable executable. No extra DLLs or subscription.
+One portable viewer. No extra DLLs or subscription.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/connections-dark.png">
@@ -20,8 +20,9 @@ One portable executable. No extra DLLs or subscription.
 - **Protected logins:** Windows Credential Manager storage; **Windows Hello is mandatory for every saved login**. Saved passwords cannot be displayed.
 - **Live statistics:** animated download/upload history, automatic kbps/Mbps units, and an optional FPS counter.
 - **HEVC performance modes:** Apple's H.265 stream at up to 30 or 60 FPS, with encrypted control/video and a bundled native decoder.
+- **Mac audio:** optional HEVC-session playback through your Windows output, with local volume and mute controls.
 - **Quality controls:** lossless VNC and JPEG options, maximum update rate, and a VNC bandwidth target, with an in-app comparison guide.
-- **Familiar controls:** mouse, keyboard, scrolling, full screen, and optional Ctrl-to-Command shortcuts.
+- **Familiar controls:** mouse, keyboard, Windows-sensitive scrolling, full screen, and optional Ctrl-to-Command shortcuts.
 - **Glass-inspired appearance:** black/charcoal in dark mode, Apple-style whites and grays in light mode, and system-blue controls. Follows Windows appearance preferences.
 - **Easy updates:** checks the official release on launch and prompts before a verified, one-click update and restart.
 - **Clipboard and files:** opt-in VNC text sharing, encrypted Unicode clipboard, and verified SFTP file transfers.
@@ -91,8 +92,23 @@ changes apply live. H.264 playback is not supported.
 
 A bandwidth target paces screen requests; **it is not a guaranteed bitrate cap**.
 Bursts can exceed it. Keyboard and mouse input are not throttled.
-Traffic measures VNC, HEVC/SRTP, and SSH payloads, excluding TCP/UDP/VPN overhead and update checks. FPS counts unique desktop
+Traffic measures VNC, HEVC/audio SRTP, and SSH payloads, excluding TCP/UDP/VPN overhead and update checks. FPS counts unique desktop
 images submitted for display, not monitor refreshes; idle screens can read 0 FPS.
+
+## Audio
+
+Open the **speaker button** and choose **Enable audio**. The app downloads and
+verifies a small, separately licensed AAC converter from the matching official
+release. Audio works with compatible **HEVC / H.265** sessions; ordinary VNC
+does not carry sound. Enabling or retrying sound reconnects an active HEVC
+session automatically, with fresh Hello approval for saved logins.
+
+Playback follows your Windows output device. Volume and mute are local to
+MacCanvas; they do not change the Mac's volume. No microphone audio is captured
+or sent. Audio content is never written to logs or media files.
+
+The optional converter uses standard LOAS/WAVE pipes, not a linked viewer codec.
+[Source and separate license terms](crates/audio-codec-tool/README.md).
 
 ## Clipboard and files
 
@@ -145,13 +161,13 @@ Close MacCanvas, then:
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/false00/maccanvas/main/install.ps1))) -Uninstall
 ```
 
-The managed application and its Desktop and Start-menu shortcuts are removed. Profiles, credentials, and audit logs are
+The managed application and its Desktop and Start-menu shortcuts are removed. Profiles, credentials, downloaded audio components, and audit logs are
 preserved; delete saved Macs in the app first to remove their logins.
 For a portable copy, delete the executable.
 
 ## Build and credits
 
-Install rustup and Visual Studio C++ Build Tools, then:
+Install rustup, Visual Studio C++ Build Tools, and CMake 3.15+, then:
 
 ```powershell
 cargo test --locked
@@ -168,5 +184,7 @@ RealVNC, TightVNC, the original VNC authors, and
 [iShareScreen](https://github.com/renegadelink/iShareScreen) for Apple's
 High Performance protocol implementation.
 
-**AGPL-3.0-or-later.** Dependency credits: [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt)
+**Viewer: AGPL-3.0-or-later.** The optional audio converter has separate
+[0BSD/Fraunhofer terms](crates/audio-codec-tool/README.md).
+Dependency credits: [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt)
 or `--licenses`.

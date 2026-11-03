@@ -63,6 +63,7 @@ fn runtime_log_failure_is_sticky_and_blocks_vnc_and_ssh_before_credentials_or_ne
             profile,
             credentials: CredentialSource::Saved,
             streaming: StreamSettings::default(),
+            audio: maccanvas::audio::Settings::default(),
             remember: false,
             window: 0,
             generation: 1,

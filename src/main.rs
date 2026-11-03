@@ -22,6 +22,16 @@ fn start() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 return Ok(());
             }
+            "--audio-component-info" => {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "version": maccanvas::VERSION, "asset": audio_codec_tool::ASSET,
+                        "sha256": audio_codec_tool::SHA256, "size": audio_codec_tool::size(),
+                    })
+                );
+                return Ok(());
+            }
             "--verify-log" => {
                 let paths: Vec<_> = arguments.map(std::path::PathBuf::from).collect();
                 if paths.is_empty() {
@@ -35,7 +45,7 @@ fn start() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--help" | "-h" => {
                 println!(
-                    "MacCanvas {}\n\nUsage: maccanvas.exe [--data-dir DIRECTORY]\n       maccanvas.exe --version\n       maccanvas.exe --licenses\n       maccanvas.exe --verify-log FILE [FILE...]\n\nPasswords are entered in the window, never on the command line.",
+                    "MacCanvas {}\n\nUsage: maccanvas.exe [--data-dir DIRECTORY]\n       maccanvas.exe --version\n       maccanvas.exe --licenses\n       maccanvas.exe --audio-component-info\n       maccanvas.exe --verify-log FILE [FILE...]\n\nPasswords are entered in the window, never on the command line.",
                     maccanvas::VERSION
                 );
                 return Ok(());
@@ -115,7 +125,12 @@ fn main() {
     let terminal = std::env::args().skip(1).any(|argument| {
         matches!(
             argument.as_str(),
-            "--version" | "--licenses" | "--verify-log" | "--help" | "-h"
+            "--version"
+                | "--licenses"
+                | "--audio-component-info"
+                | "--verify-log"
+                | "--help"
+                | "-h"
         )
     });
     if let Err(error) = start() {

@@ -34,6 +34,7 @@ pub enum Event {
         credentials_saved: bool,
     },
     Warning(String),
+    Audio(crate::audio::Status),
     Error(String),
     Disconnected,
 }
@@ -42,6 +43,7 @@ pub struct Request {
     pub profile: Profile,
     pub credentials: CredentialSource,
     pub streaming: StreamSettings,
+    pub audio: crate::audio::Settings,
     pub remember: bool,
     pub window: isize,
     pub generation: u64,
@@ -112,6 +114,7 @@ impl Session {
         request
             .streaming
             .validate_authentication(request.profile.authentication)?;
+        request.audio.validate()?;
         let encoding = request.streaming.encoding;
         request.audit.critical("session.connection.requested", Level::Info, json!({
             "server.address": request.profile.host, "server.port": request.profile.port,
@@ -190,6 +193,12 @@ impl Session {
     }
 
     pub fn send(&self, command: Command) -> Result<()> {
+        if matches!(command, Command::Audio(_)) && !self.uses_hevc() {
+            return Err(Error::Audio {
+                code: None,
+                message: "Audio requires an HEVC session".into(),
+            });
+        }
         if let Command::Configure(settings) = command
             && self.requires_reconnect(settings)
         {

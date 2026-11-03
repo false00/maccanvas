@@ -56,6 +56,9 @@ struct State {
     retired: Vec<Session>,
     audit: Scope,
     audit_reported: bool,
+    audio_install: Option<mpsc::Receiver<Result<PathBuf>>>,
+    audio_persist_at: Option<Instant>,
+    audio_restart: bool,
     network_logged: Instant,
     clipboard: native::Watcher,
     pending_clipboard: Option<(u32, zeroize::Zeroizing<String>)>,
@@ -70,6 +73,8 @@ struct State {
     buttons: u8,
     pointer: (u16, u16),
     pending_pointer: Option<(u16, u16)>,
+    scroll: input::ScrollAccumulator,
+    scroll_scale: input::ScrollScale,
     keys: HashMap<String, u32>,
     modifiers: [bool; 4],
     monitor: Monitor,
@@ -98,6 +103,7 @@ impl State {
             "profile.count":self.settings.profiles.len(), "ui.sidebar_open":self.settings.sidebar_open,
             "ui.show_fps":self.settings.show_fps, "input.ctrl_as_command":self.settings.ctrl_as_command,
             "rfb.streaming":self.settings.streaming,
+            "audio.playback":self.settings.audio,
         }))
     }
 
@@ -122,6 +128,7 @@ impl State {
 
     fn release(&mut self) -> Result<()> {
         self.pending_pointer = None;
+        self.scroll.clear();
         let keys: Vec<_> = self.keys.drain().map(|(_, value)| value).collect();
         let modifiers = std::mem::take(&mut self.modifiers);
         let buttons = std::mem::take(&mut self.buttons);
@@ -151,6 +158,19 @@ impl State {
                 x: self.pointer.0,
                 y: self.pointer.1,
                 buttons: 0,
+            })?;
+        }
+        Ok(())
+    }
+
+    fn flush_scroll(&mut self) -> Result<()> {
+        let steps = self.scroll.drain();
+        if !steps.is_empty() {
+            self.send(Command::Scroll {
+                x: self.pointer.0,
+                y: self.pointer.1,
+                buttons: self.buttons,
+                steps,
             })?;
         }
         Ok(())
@@ -363,6 +383,7 @@ fn close_stream(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
         state.last_displayed_frame = 0;
         state.connection_credentials = None;
         state.reconnect = None;
+        state.audio_restart = false;
         state.clipboard = native::Watcher::default();
         state.pending_clipboard = None;
         state
@@ -388,6 +409,8 @@ fn close_stream(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
     app.set_clipboard_shared(state.borrow().settings.clipboard_enabled);
     app.set_connecting(false);
     app.set_clipboard_open(false);
+    app.set_audio_open(false);
+    app.set_audio_status("Audio is available with HEVC.".into());
     app.set_frame_image(slint::Image::default());
     app.set_active_encoding("Waiting for pixels".into());
     app.set_status("Disconnected".into());
@@ -447,6 +470,7 @@ fn start_connection(
         profile: profile.clone(),
         credentials,
         streaming: state.settings.streaming,
+        audio: state.settings.audio,
         remember,
         window: hwnd,
         generation: state.generation,
@@ -461,7 +485,12 @@ fn start_connection(
     Ok(())
 }
 
-fn apply_streaming(app: &App, state: &Rc<RefCell<State>>, settings: StreamSettings) -> Result<()> {
+fn apply_streaming(
+    app: &App,
+    state: &Rc<RefCell<State>>,
+    settings: StreamSettings,
+    restart_audio: bool,
+) -> Result<()> {
     if app.get_connecting() {
         return Err(Error::Configuration(
             "Finish or cancel the current connection before applying stream settings".into(),
@@ -472,7 +501,7 @@ fn apply_streaming(app: &App, state: &Rc<RefCell<State>>, settings: StreamSettin
         let reconnect = if state
             .session
             .as_ref()
-            .is_some_and(|session| session.requires_reconnect(settings))
+            .is_some_and(|session| session.requires_reconnect(settings) || restart_audio)
         {
             let profile = state.connection_profile.clone().ok_or_else(|| {
                 Error::Protocol("The active connection profile is unavailable".into())
@@ -487,6 +516,7 @@ fn apply_streaming(app: &App, state: &Rc<RefCell<State>>, settings: StreamSettin
                 json!({
                     "profile.id":profile.id, "rfb.streaming.previous":state.settings.streaming,
                     "rfb.streaming":settings, "vnc.session.generation":state.generation,
+                    "session.reconnect.reason":if restart_audio { "audio" } else { "stream_settings" },
                 }),
             )?;
             Some(Reconnect {
@@ -746,6 +776,59 @@ fn window_handle(app: &App) -> Result<isize> {
     }
 }
 
+fn tick_audio(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
+    let result = {
+        let mut state = state.borrow_mut();
+        if state
+            .audio_persist_at
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            state.audio_persist_at = None;
+            state.persist()?;
+        }
+        match state.audio_install.as_ref().map(mpsc::Receiver::try_recv) {
+            Some(Ok(result)) => {
+                state.audio_install = None;
+                Some(result)
+            }
+            Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                state.audio_install = None;
+                Some(Err(Error::Audio {
+                    code: None,
+                    message: "Audio installation stopped unexpectedly".into(),
+                }))
+            }
+            _ => None,
+        }
+    };
+    if let Some(result) = result {
+        app.set_audio_installing(false);
+        match result {
+            Ok(_) => {
+                app.set_audio_codec_missing(false);
+                app.set_audio_status("Audio codec installed.".into());
+                if app.get_connected() && app.get_hevc_active() {
+                    let settings = state.borrow().settings.streaming;
+                    apply_streaming(app, state, settings, true)?;
+                } else if app.get_connecting() {
+                    state.borrow_mut().audio_restart = true;
+                }
+            }
+            Err(error) => {
+                state.borrow().audit.critical(
+                    "component.audio.install.failed",
+                    Level::Error,
+                    maccanvas::audit::error_attributes(&error),
+                )?;
+                app.set_audio_status(error.to_string().into());
+                app.set_audio_codec_missing(true);
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn tick_updates(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
     loop {
         let event = state.borrow().updater.event()?;
@@ -911,6 +994,16 @@ pub fn run(
     app.set_sidebar_open(settings.sidebar_open || settings.profiles.is_empty());
     app.set_show_fps(settings.show_fps);
     app.set_clipboard_shared(settings.clipboard_enabled);
+    app.set_audio_muted(settings.audio.muted);
+    app.set_audio_volume(f32::from(settings.audio.volume));
+    match maccanvas::audio::codec_available() {
+        Ok(path) => app.set_audio_codec_missing(path.is_none()),
+        Err(error) => {
+            app.set_audio_codec_missing(true);
+            app.set_audio_status(error.to_string().into());
+            notify(&app, error);
+        }
+    }
     app.set_editor_open(settings.profiles.is_empty());
     app.set_app_version(maccanvas::VERSION.into());
     app.set_build_date(maccanvas::BUILD_UTC.into());
@@ -956,6 +1049,9 @@ pub fn run(
         retired: Vec::new(),
         audit,
         audit_reported: false,
+        audio_install: None,
+        audio_persist_at: None,
+        audio_restart: false,
         network_logged: Instant::now(),
         clipboard: native::Watcher::default(),
         pending_clipboard: None,
@@ -970,6 +1066,8 @@ pub fn run(
         buttons: 0,
         pointer: (0, 0),
         pending_pointer: None,
+        scroll: input::ScrollAccumulator::default(),
+        scroll_scale: input::ScrollScale::system()?,
         keys: HashMap::new(),
         modifiers: [false; 4],
         monitor: Monitor::new(Instant::now()),
@@ -1040,7 +1138,7 @@ pub fn run(
         let Some(app) = weak.upgrade() else { return };
         let result = (|| -> Result<()> {
             let mut state = update_state.borrow_mut();
-            if state.session.is_some() || state.reconnect.is_some() || state.files.active() {
+            if state.session.is_some() || state.reconnect.is_some() || state.files.active() || state.audio_install.is_some() {
                 return Err(Error::Update(
                     "Disconnect from the Mac and wait for SSH cleanup before updating and restarting".into(),
                 ));
@@ -1164,7 +1262,7 @@ pub fn run(
     });
     let close_state = state.clone();
     app.window().on_close_requested(move || {
-        if close_state.borrow().updater.installing {
+        if close_state.borrow().updater.installing || close_state.borrow().audio_install.is_some() {
             slint::CloseRequestResponse::KeepWindowShown
         } else {
             slint::CloseRequestResponse::HideWindow
@@ -1241,7 +1339,7 @@ pub fn run(
     app.on_apply_streaming(move || {
         let Some(app) = weak.upgrade() else { return };
         let result = read_stream_form(&app)
-            .and_then(|settings| apply_streaming(&app, &quality_state, settings));
+            .and_then(|settings| apply_streaming(&app, &quality_state, settings, false));
         if let Err(error) = result {
             notify(&app, error);
         }
@@ -1414,32 +1512,10 @@ pub fn run(
                 return Ok(());
             };
             state.flush_pointer()?;
-            let mask = (if event.delta_y > 0.0 {
-                8
-            } else if event.delta_y < 0.0 {
-                16
-            } else {
-                0
-            }) | (if event.delta_x > 0.0 {
-                32
-            } else if event.delta_x < 0.0 {
-                64
-            } else {
-                0
-            });
-            if mask != 0 {
-                state.send(Command::Pointer {
-                    x,
-                    y,
-                    buttons: state.buttons | mask,
-                })?;
-                state.send(Command::Pointer {
-                    x,
-                    y,
-                    buttons: state.buttons,
-                })?;
-            }
-            Ok(())
+            state.pointer = (x, y);
+            let scale = state.scroll_scale;
+            state.scroll.add(event.delta_x, event.delta_y, scale)?;
+            state.flush_scroll()
         })();
         if let Err(error) = result {
             notify(&app, error);
@@ -1512,6 +1588,91 @@ pub fn run(
         }
         true
     });
+    let weak = app.as_weak();
+    let audio_state = state.clone();
+    app.on_audio_changed(move || {
+        let Some(app) = weak.upgrade() else { return };
+        let result = (|| -> Result<()> {
+            let volume = app.get_audio_volume();
+            if !volume.is_finite() || !(0.0..=100.0).contains(&volume) {
+                return Err(Error::Configuration(
+                    "Audio volume must be between 0 and 100".into(),
+                ));
+            }
+            let settings = maccanvas::audio::Settings {
+                muted: app.get_audio_muted(),
+                volume: volume.round() as u8,
+            };
+            settings.validate()?;
+            let mut state = audio_state.borrow_mut();
+            state.settings.audio = settings;
+            state.audio_persist_at = Some(Instant::now() + Duration::from_millis(300));
+            if let Some(session) = &state.session
+                && session.uses_hevc()
+            {
+                session.send(Command::Audio(settings))?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            notify(&app, error);
+        }
+    });
+    let weak = app.as_weak();
+    let install_audio_state = state.clone();
+    app.on_audio_install(move || {
+        let Some(app) = weak.upgrade() else { return };
+        let result = (|| -> Result<()> {
+            let mut state = install_audio_state.borrow_mut();
+            if state.audio_install.is_some() || state.updater.installing {
+                return Err(Error::Configuration(
+                    "Wait for the current installation to finish".into(),
+                ));
+            }
+            let scope = state.audit.clone();
+            scope.critical(
+                "component.audio.install.requested",
+                Level::Info,
+                json!({
+                    "artifact.hash.sha256":audio_codec_tool::SHA256,
+                    "artifact.size":audio_codec_tool::size(),
+                }),
+            )?;
+            let (sender, receiver) = mpsc::channel();
+            let _worker = std::thread::Builder::new()
+                .name("maccanvas-audio-install".into())
+                .spawn(move || {
+                    let result = maccanvas::audio::install_codec(&scope);
+                    if sender.send(result).is_err() {
+                        eprintln!("MacCanvas audio installer window closed");
+                    }
+                })?;
+            state.audio_install = Some(receiver);
+            app.set_audio_installing(true);
+            app.set_audio_status("Downloading and verifying the audio codec...".into());
+            Ok(())
+        })();
+        if let Err(error) = result {
+            notify(&app, error);
+        }
+    });
+    let weak = app.as_weak();
+    let retry_audio_state = state.clone();
+    app.on_audio_retry(move || {
+        let Some(app) = weak.upgrade() else { return };
+        let result = (|| -> Result<()> {
+            if !app.get_connected() || !app.get_hevc_active() {
+                return Err(Error::Configuration(
+                    "Connect with HEVC before retrying audio".into(),
+                ));
+            }
+            let settings = retry_audio_state.borrow().settings.streaming;
+            apply_streaming(&app, &retry_audio_state, settings, true)
+        })();
+        if let Err(error) = result {
+            notify(&app, error);
+        }
+    });
     files_ui::wire(&app, state.clone());
     let timer = slint::Timer::default();
     let weak = app.as_weak();
@@ -1524,6 +1685,9 @@ pub fn run(
             if let Err(error) = tick_updates(&app, &timer_state) {
                 app.set_update_status(error.to_string().into());
                 app.set_update_banner(true);
+            }
+            if let Err(error) = tick_audio(&app, &timer_state) {
+                notify(&app, error);
             }
             for (generation, event) in receiver.try_iter() {
                 if generation != timer_state.borrow().generation {
@@ -1571,8 +1735,32 @@ pub fn run(
                         }
                         app.set_editor_open(false);
                         app.invoke_focus_canvas();
+                        let restart_audio = {
+                            let mut state = timer_state.borrow_mut();
+                            std::mem::take(&mut state.audio_restart)
+                        };
+                        if restart_audio && hevc {
+                            let settings = timer_state.borrow().settings.streaming;
+                            if let Err(error) = apply_streaming(&app, &timer_state, settings, true) {
+                                notify(&app, error);
+                            }
+                        }
                     }
                     Event::Warning(message) => notify(&app, message),
+                    Event::Audio(status) => {
+                        let missing = matches!(status, maccanvas::audio::Status::CodecMissing(_));
+                        app.set_audio_codec_missing(missing);
+                        let description = match status {
+                            maccanvas::audio::Status::Waiting => "Waiting for Mac audio...".to_owned(),
+                            maccanvas::audio::Status::CodecMissing(message) => message,
+                            maccanvas::audio::Status::Playing => "Mac system audio - 48 kHz stereo".to_owned(),
+                            maccanvas::audio::Status::Unavailable(message) => {
+                                notify(&app, &message);
+                                message
+                            }
+                        };
+                        app.set_audio_status(description.into());
+                    }
                     Event::Error(message) => notify(&app, message),
                     Event::Disconnected => {
                         if let Err(error) = disconnect(&app, &timer_state) {
@@ -1657,7 +1845,9 @@ pub fn run(
                     }
                 }
                 if app.get_connected() {
-                    timer_state.borrow_mut().flush_pointer()?;
+                    let mut state = timer_state.borrow_mut();
+                    state.flush_pointer()?;
+                    state.flush_scroll()?;
                 }
                 let mut state = timer_state.borrow_mut();
                 let now = Instant::now();
@@ -1668,6 +1858,7 @@ pub fn run(
                     });
                     app.set_motion_enabled(theme::motion_enabled()?);
                     app.set_glass_enabled(theme::glass_enabled()?);
+                    state.scroll_scale = input::ScrollScale::system()?;
                     state.theme_checked = now;
                     app.set_pulse(!app.get_pulse());
                 }
@@ -1719,6 +1910,10 @@ pub fn run(
     );
     app.run()
         .map_err(|error| Error::Display(error.to_string()))?;
+    let save_audio = state.borrow_mut().audio_persist_at.take().is_some();
+    if save_audio {
+        state.borrow().persist()?;
+    }
     state.borrow_mut().files.stop(&app);
     if let Some(session) = state.borrow_mut().session.take() {
         session.finish()?;

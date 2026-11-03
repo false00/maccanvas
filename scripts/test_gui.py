@@ -51,6 +51,8 @@ user32.SetPhysicalCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
 user32.SetForegroundWindow.argtypes = [wintypes.HWND]
 user32.GetForegroundWindow.restype = wintypes.HWND
 user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.SystemParametersInfoW.argtypes = [wintypes.UINT, wintypes.UINT, ctypes.c_void_p, wintypes.UINT]
+user32.SystemParametersInfoW.restype = wintypes.BOOL
 gdi32.GetPixel.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int]
 gdi32.GetPixel.restype = wintypes.DWORD
 
@@ -350,6 +352,8 @@ def main(executable, native_messages=False, ssh_fixture_executable=None, cancel_
         try:
             window = wait(lambda: native_window(process.pid), process, fixture, "native window")
             time.sleep(1)
+            automate(process.pid, fixture.port, "audio-settings")
+            time.sleep(0.5)
             automate(process.pid, fixture.port, "connect")
             wait(fixture.authenticated.is_set, process, fixture, "Apple DH authentication")
             bounds = automate(process.pid, fixture.port, "bounds")
@@ -406,6 +410,31 @@ def main(executable, native_messages=False, ssh_fixture_executable=None, cancel_
                      process, fixture, "key releases")
             print("PASS: real Slint GUI, Apple DH login, 4K Lanczos frame, DPI-aware "
                   + ("native mouse/key message dispatch" if native_messages else "physical mouse/key input"))
+            wheel_lines = wintypes.UINT()
+            wheel_chars = wintypes.UINT()
+            if not user32.SystemParametersInfoW(0x0068, 0, ctypes.byref(wheel_lines), 0):
+                raise ctypes.WinError(ctypes.get_last_error())
+            if not user32.SystemParametersInfoW(0x006C, 0, ctypes.byref(wheel_chars), 0):
+                raise ctypes.WinError(ctypes.get_last_error())
+            vertical = 20 if wheel_lines.value == 0xffffffff else wheel_lines.value
+            horizontal = 20 if wheel_chars.value == 0xffffffff else wheel_chars.value
+            wheel_position = ((y & 0xffff) << 16) | (x & 0xffff)
+            before_up = sum(bool(mask & 8) for mask, _, _ in fixture.pointers)
+            for delta in [120, 360, 30, 30, 30, 30, 2400]:
+                if not user32.PostMessageW(window, 0x20A, (delta & 0xffff) << 16, wheel_position):
+                    raise ctypes.WinError(ctypes.get_last_error())
+            if vertical:
+                wait(lambda: sum(bool(mask & 8) for mask, _, _ in fixture.pointers) == before_up + 25 * vertical,
+                     process, fixture, "proportional coalesced and fractional wheel movement")
+            before_right = sum(bool(mask & 64) for mask, _, _ in fixture.pointers)
+            if not user32.PostMessageW(window, 0x20E, 120 << 16, wheel_position):
+                raise ctypes.WinError(ctypes.get_last_error())
+            if horizontal:
+                wait(lambda: sum(bool(mask & 64) for mask, _, _ in fixture.pointers) == before_right + horizontal,
+                     process, fixture, "Windows horizontal wheel direction and sensitivity")
+            print("PASS: native coalesced/fractional wheel magnitude, horizontal direction and Windows sensitivity")
+            automate(process.pid, fixture.port, "audio-vnc")
+            print("PASS: audio defaults, local mute/volume preferences and explicit video-only VNC controls")
             deadline = time.monotonic() + 10
             while True:
                 samples = automate(process.pid, fixture.port, "telemetry")
@@ -471,6 +500,7 @@ def main(executable, native_messages=False, ssh_fixture_executable=None, cancel_
             assert configuration["streaming"]["target_kbps"] == 1000
             assert configuration["streaming"]["max_fps"] == 15
             assert configuration["streaming"]["compression"] == 3
+            assert configuration["audio"] == {"muted": True, "volume": 37}, configuration["audio"]
             assert -253 in fixture.offers[-1]
             assert "dark_theme" not in configuration and "hello_for_all_connections" not in configuration
             print("PASS: profiles contain neither username nor password")

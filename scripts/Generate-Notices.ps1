@@ -7,6 +7,9 @@ $path = Join-Path $root 'THIRD_PARTY_NOTICES.txt'
 $text = [IO.File]::ReadAllText($path).Replace("`r`n", "`n")
 $text += "`n" + [IO.File]::ReadAllText((Join-Path $root 'licenses\ISHARESCREEN-NOTICE.txt'))
 $text += "`n" + [IO.File]::ReadAllText((Join-Path $root 'crates\native-hevc\DISTRIBUTION-NOTICES.txt'))
+$text += "`n" + [IO.File]::ReadAllText((Join-Path $root 'crates\audio-codec-tool\DISTRIBUTION-NOTICES.txt'))
+$text += "`n" + [IO.File]::ReadAllText((Join-Path $root 'crates\audio-codec-tool\LICENSE'))
+$text += "`n" + [IO.File]::ReadAllText((Join-Path $root 'crates\audio-codec-tool\vendor\fdk-aac\NOTICE'))
 $text = $text.Replace("`r`n", "`n")
 $text = [regex]::Replace($text, '[ \t]+(?=\n)', '').TrimEnd() + "`n"
 [IO.File]::WriteAllText($path, $text, [Text.UTF8Encoding]::new($false))

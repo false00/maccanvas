@@ -1,3 +1,6 @@
 /target/
 /dist/
 *.log
+/crates/audio-codec-tool/target/
+/crates/audio-codec-tool/Cargo.lock
+__pycache__/

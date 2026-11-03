@@ -29,13 +29,14 @@ function Set-Fixture([string]$Version, [byte]$Marker) {
     $script:binary[152] = 0x0b; $script:binary[153] = 0x02
     $script:binary[300] = $Marker
     $script:hash = Get-MacCanvasHash $script:binary
-    $script:checksums = [Text.Encoding]::UTF8.GetBytes("$script:hash  MacCanvas-windows-x64.exe`n")
+    $script:checksums = [Text.Encoding]::UTF8.GetBytes("$script:hash  MacCanvas-windows-x64.exe`n$('a' * 64)  MacCanvas-audio-windows-x64.exe`n")
     $base = "https://github.com/false00/maccanvas/releases/download/$Version"
     $script:release = [pscustomobject]@{
         tag_name = $Version; draft = $false; prerelease = $false
         assets = @(
             [pscustomobject]@{ name = 'MacCanvas-windows-x64.exe'; size = $script:binary.Length; digest = "sha256:$script:hash"; browser_download_url = "$base/MacCanvas-windows-x64.exe" }
             [pscustomobject]@{ name = 'SHA256SUMS.txt'; size = $script:checksums.Length; digest = "sha256:$(Get-MacCanvasHash $script:checksums)"; browser_download_url = "$base/SHA256SUMS.txt" }
+            [pscustomobject]@{ name = 'MacCanvas-audio-windows-x64.exe'; size = 1024; digest = "sha256:$('a' * 64)"; browser_download_url = "$base/MacCanvas-audio-windows-x64.exe" }
         )
     }
 }

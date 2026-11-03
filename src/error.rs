@@ -14,6 +14,8 @@ pub enum Error {
     Configuration(String),
     #[error("Display: {0}")]
     Display(String),
+    #[error("Audio: {message}")]
+    Audio { code: Option<i32>, message: String },
     #[error("Update: {0}")]
     Update(String),
     #[error("Update recovery: {0}")]

@@ -3,6 +3,9 @@
 *.ico binary
 *.png binary
 *.hevc binary
+*.aaceld binary
 # Preserve upstream codec formatting and verbatim native license blocks.
 crates/native-hevc/vendor/** -whitespace
 crates/native-hevc/DISTRIBUTION-NOTICES.txt -whitespace
+crates/audio-codec-tool/vendor/** -whitespace
+crates/audio-codec-tool/DISTRIBUTION-NOTICES.txt -whitespace

@@ -1,0 +1,49 @@
+import { GlassTheme, GlassPanel, Button, CheckBox, Slider } from "glass.slint";
+
+export component AudioOverlay inherits Rectangle {
+    in property <bool> supported;
+    in property <bool> connected;
+    in property <bool> missing;
+    in property <bool> installing;
+    in property <string> status;
+    in-out property <bool> muted;
+    in-out property <float> volume;
+    callback changed();
+    callback close();
+    callback install();
+    callback retry();
+    background: GlassTheme.dark ? #00000099 : #00000033;
+    TouchArea { clicked => { root.close(); } }
+    FocusScope {
+        init => { self.focus(); }
+        key-pressed(event) => { if event.text == Key.Escape { root.close(); return accept; } return reject; }
+        GlassPanel {
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            width: min(520px, parent.width - 48px); height: min(470px, parent.height - 40px);
+            radius: 24px; raised: true;
+            TouchArea { }
+            VerticalLayout {
+                padding: 26px; spacing: 16px;
+                HorizontalLayout {
+                    Text { text: "Mac audio"; color: GlassTheme.ink; font-size: 23px; font-weight: 700; }
+                    Button { text: "Done"; clicked => { root.close(); } }
+                }
+                Text { text: root.connected && !root.supported ? "Standard VNC does not carry audio. Choose HEVC / H.265 in Quality to hear your Mac." : root.status; color: GlassTheme.accent; font-size: 13px; wrap: word-wrap; }
+                if root.missing || root.installing : VerticalLayout {
+                    spacing: 12px;
+                    Text { text: "Audio uses an optional, separately licensed AAC converter. Enabling audio downloads and verifies it from the official release. No system codec extension is installed."; color: GlassTheme.muted; font-size: 12px; wrap: word-wrap; }
+                    Button { text: root.installing ? "Downloading audio..." : "Enable audio"; primary: true; enabled: !root.installing; clicked => { root.install(); } }
+                }
+                CheckBox { text: "Mute playback"; accessible-label: "Mute Mac audio"; checked <=> root.muted; enabled: !root.connected || root.supported; toggled => { root.changed(); } }
+                HorizontalLayout {
+                    Text { text: "Playback volume"; color: GlassTheme.ink; font-size: 13px; vertical-alignment: center; }
+                    Slider { accessible-label: "Audio volume"; minimum: 0; maximum: 100; step: 1; value <=> root.volume; enabled: !root.connected || root.supported; changed => { root.changed(); } }
+                    Text { text: round(root.volume) + "%"; color: GlassTheme.muted; font-size: 12px; vertical-alignment: center; min-width: 40px; }
+                }
+                Text { text: "Playback follows your Windows output device. These controls do not change the Mac's volume. No microphone audio is captured or sent."; color: GlassTheme.muted; font-size: 12px; wrap: word-wrap; }
+                if root.connected && root.supported && !root.missing : Button { text: "Retry audio"; enabled: !root.installing; clicked => { root.retry(); } }
+                Text { text: "Enabling or retrying audio reconnects an active HEVC stream automatically. Saved logins require Windows Hello again."; color: GlassTheme.muted; font-size: 11px; wrap: word-wrap; }
+            }
+        }
+    }
+}

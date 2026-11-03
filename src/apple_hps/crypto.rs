@@ -231,6 +231,7 @@ pub(super) struct Packet {
 pub(super) struct Srtp {
     keys: Keys,
     streams: HashMap<u32, Replay>,
+    payload_type: u8,
 }
 
 impl Srtp {
@@ -238,11 +239,20 @@ impl Srtp {
         Self {
             keys: Keys::new(blob, 0),
             streams: HashMap::new(),
+            payload_type: 100,
+        }
+    }
+
+    pub fn audio(blob: &[u8; 46]) -> Self {
+        Self {
+            keys: Keys::new(blob, 0),
+            streams: HashMap::new(),
+            payload_type: 101,
         }
     }
 
     pub fn receive(&mut self, data: &[u8]) -> Result<Option<Packet>> {
-        if data.len() < 22 || data[0] >> 6 != 2 || data[1] & 127 != 100 {
+        if data.len() < 22 || data[0] >> 6 != 2 || data[1] & 127 != self.payload_type {
             return Ok(None);
         }
         let end = data.len() - 10;

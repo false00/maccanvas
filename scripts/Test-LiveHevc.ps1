@@ -5,6 +5,9 @@ param(
     [string]$Application = '',
     [ValidateSet(30, 60)][int]$Fps = 30,
     [ValidateRange(1, 120)][int]$ObserveSeconds = 40,
+    [ValidateRange(10, 240)][int]$HelloTimeoutSeconds = 240,
+    [switch]$RequireAudio,
+    [switch]$EnableAudio,
     [switch]$ExerciseSwitching,
     [switch]$KeepEvidence
 )
@@ -29,6 +32,7 @@ $null = [IO.Directory]::CreateDirectory($temporary)
 $fixture = @{
     version = 1; profiles = @($profile); sidebar_open = $true; show_fps = $true
     ctrl_as_command = $true; clipboard_enabled = $false
+    audio = @{ muted = $true; volume = 15 }
     streaming = @{
         encoding = if ($Fps -eq 60) { 'hevc60' } else { 'hevc30' }
         compression = 6; jpeg_quality = 8; target_kbps = 0; max_fps = $Fps
@@ -87,7 +91,7 @@ try {
     if ($null -eq $button) { throw 'The saved-login Connect button was not found.' }
     $button.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
     Write-Output 'Approve the normal Windows Hello request to test this saved Mac login. Passwords never enter the test harness.'
-    $deadline = [DateTime]::UtcNow.AddSeconds(240)
+    $deadline = [DateTime]::UtcNow.AddSeconds($HelloTimeoutSeconds)
     $approvalObserved = $false
     do {
         Start-Sleep -Milliseconds 250
@@ -112,13 +116,28 @@ try {
         } while ([DateTime]::UtcNow -lt $deadline)
     }
     if ($success) {
+        if ($RequireAudio -and -not $EnableAudio) {
+            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            while (-not (Read-OwnedAudit).Contains('"event_name":"media.audio.first_frame"')) {
+                if ([DateTime]::UtcNow -ge $deadline) { throw 'No authenticated AAC decoded. Play audio on the Mac and enable the matching converter before requiring this check.' }
+                Start-Sleep -Milliseconds 100
+            }
+            Write-Output 'Actual Mac -> authenticated AAC-ELD-SBR -> isolated decoder -> muted Windows playback: PASS'
+        }
         Assert-OwnedStatus
-        if ($ExerciseSwitching) {
-            foreach ($mode in @('hevc60', 'auto', 'hevc30')) {
+        if ($ExerciseSwitching -or $EnableAudio) {
+            $modes = @()
+            if ($EnableAudio) { $modes += 'audio' }
+            if ($ExerciseSwitching) { $modes += @('hevc60', 'auto', 'hevc30') }
+            foreach ($mode in $modes) {
                 $before = @(Read-OwnedRecords).Count
-                & (Join-Path $PSScriptRoot 'Gui-Fixture.ps1') -ProcessId $process.Id -Action switch-stream -StreamMode $mode
+                if ($mode -ceq 'audio') {
+                    & (Join-Path $PSScriptRoot 'Gui-Fixture.ps1') -ProcessId $process.Id -Action enable-audio
+                } else {
+                    & (Join-Path $PSScriptRoot 'Gui-Fixture.ps1') -ProcessId $process.Id -Action switch-stream -StreamMode $mode
+                }
                 $success = $false
-                $deadline = [DateTime]::UtcNow.AddSeconds(240)
+                $deadline = [DateTime]::UtcNow.AddSeconds($HelloTimeoutSeconds + $(if ($mode -ceq 'audio') { 90 } else { 0 }))
                 $approvalObserved = $false
                 $generation = $null
                 do {
@@ -142,7 +161,11 @@ try {
                     $ready = @($fresh | Where-Object {
                         $_.event_name -ceq $expected -and $_.attributes.'vnc.session.generation' -eq $generation
                     })
-                    $success = $ready.Count -eq 1 -and $approval.Count -eq 1
+                    $audioReady = -not $RequireAudio -or $mode -ceq 'auto' -or @($fresh | Where-Object {
+                        $_.event_name -ceq 'media.audio.first_frame' -and
+                        $_.attributes.'vnc.session.generation' -eq $generation
+                    }).Count -eq 1
+                    $success = $ready.Count -eq 1 -and $approval.Count -eq 1 -and $audioReady
                 } while (-not $success -and [DateTime]::UtcNow -lt $deadline)
                 if (-not $success) { throw "Automatic switch to $mode did not produce an authenticated stream." }
                 $names = @($fresh | ForEach-Object event_name)
@@ -166,7 +189,7 @@ try {
                     })
                     if ($closed.Count -gt 0) { $success = $false; throw 'The restarted stream did not remain connected.' }
                 } while ([DateTime]::UtcNow -lt $deadline)
-                Write-Output "Apply -> old stream closed -> fresh Hello -> same Mac in $mode ($ObserveSeconds seconds sustained): PASS"
+                Write-Output "Reconnect -> old stream closed -> fresh Hello -> same Mac in $mode ($ObserveSeconds seconds sustained): PASS"
             }
         }
         Write-Output "Actual Mac -> encrypted HEVC -> native RGBA -> connected Windows UI ($Fps FPS preset, $ObserveSeconds seconds sustained): PASS"

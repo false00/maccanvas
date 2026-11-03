@@ -31,7 +31,7 @@ use crate::{
 };
 use serde_json::json;
 
-mod http;
+pub(crate) mod http;
 mod shortcuts;
 
 const REPOSITORY: &str = "false00/maccanvas";
@@ -152,9 +152,11 @@ pub fn check() -> Result<Option<Release>> {
 }
 
 pub fn verify_executable(bytes: &[u8], release: &Release) -> Result<()> {
-    if bytes.len() as u64 != release.size
-        || format!("{:x}", Sha256::digest(bytes)) != release.sha256
-    {
+    verify_binary(bytes, release.size, &release.sha256)
+}
+
+pub(crate) fn verify_binary(bytes: &[u8], size: u64, sha256: &str) -> Result<()> {
+    if bytes.len() as u64 != size || format!("{:x}", Sha256::digest(bytes)) != sha256 {
         return Err(failed(
             "Executable SHA-256 or size mismatch. Nothing was replaced.",
         ));
@@ -673,6 +675,22 @@ mod tests {
         assert!(parse_release(&json, "0.2.1").unwrap().is_some());
         assert!(parse_release(&json, "9.0.0").unwrap().is_none());
         assert!(parse_release(&json, "10.0.0").unwrap().is_none());
+    }
+    #[test]
+    fn optional_audio_assets_do_not_change_the_viewer_update_identity() {
+        let (_, release) = fixture();
+        let mut json = metadata(&release);
+        json["assets"].as_array_mut().unwrap().push(serde_json::json!({
+            "name": audio_codec_tool::ASSET, "size": audio_codec_tool::size(),
+            "digest": format!("sha256:{}", audio_codec_tool::SHA256),
+            "browser_download_url": format!("https://github.com/{REPOSITORY}/releases/download/{}/{}", release.tag, audio_codec_tool::ASSET),
+        }));
+        let selected = parse_release(&serde_json::to_vec(&json).unwrap(), "0.4.2")
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.sha256, release.sha256);
+        assert_eq!(selected.size, release.size);
+        assert_eq!(selected.url, release.url);
     }
     #[test]
     fn rejects_foreign_assets_missing_hashes_and_prereleases() {

@@ -79,10 +79,16 @@ pub(super) fn run(
         request.streaming.encoding == Encoding::Hevc60,
         request.streaming.max_fps,
         request.audit.clone(),
+        request.audio,
     )?;
     let mut profile = Some(request.profile);
     let mut credentials = Some(credentials);
     while !control.cancelled.load(Ordering::Acquire) {
+        while let Some(status) = client.audio_status()? {
+            events
+                .send((request.generation, Event::Audio(status)))
+                .map_err(|_| Error::Protocol("Connection window closed".into()))?;
+        }
         for _ in 0..128 {
             match incoming.try_recv() {
                 Ok(WriterCommand::Input(command)) => client.input(command)?,

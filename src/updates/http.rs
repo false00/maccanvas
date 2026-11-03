@@ -84,7 +84,7 @@ fn location(request: &Handle) -> Result<String> {
     String::from_utf16(&buffer).map_err(failed)
 }
 
-pub(super) fn download(
+pub(crate) fn download(
     input: &str,
     maximum: u64,
     budget: Duration,

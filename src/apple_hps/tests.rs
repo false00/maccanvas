@@ -110,7 +110,7 @@ fn media_answer() -> Vec<u8> {
     Value::Dictionary(dictionary)
         .to_writer_binary(&mut plist)
         .unwrap();
-    let mut combined = super::offers::Offers::new().unwrap().audio;
+    let mut combined = super::offers::Offers::new(false).unwrap().audio;
     combined.extend_from_slice(&[17; 92]);
     combined.extend_from_slice(&plist);
     plist = combined;
@@ -140,7 +140,7 @@ fn encrypted_apple_peer_decodes_real_hevc_and_preserves_input_and_hello_gates() 
     let port = listener.local_addr().unwrap().port();
     assert!(port < 65535);
     let video_socket = UdpSocket::bind(("127.0.0.2", port + 1)).unwrap();
-    let _control_socket = UdpSocket::bind(("127.0.0.2", port)).unwrap();
+    let control_socket = UdpSocket::bind(("127.0.0.2", port)).unwrap();
     let (observed, received) = mpsc::channel();
     let private = RsaPrivateKey::new(&mut rand::rngs::OsRng, 2048).unwrap();
     let public = private.to_public_key().to_public_key_der().unwrap();
@@ -228,6 +228,7 @@ fn encrypted_apple_peer_decodes_real_hevc_and_preserves_input_and_hello_gates() 
         assert_eq!(read_record(&mut socket, &mut cipher)[0], 2);
         let offer = read_record(&mut socket, &mut cipher);
         assert_eq!(offer[0], 0x1c);
+        let audio_key: [u8; 46] = offer[0x52..0x80].try_into().unwrap();
         let audio_length = usize::from(u16::from_be_bytes([offer[10], offer[11]]));
         let video_offset = 0x80 + audio_length;
         let media_key: [u8; 46] = offer[video_offset + 46..video_offset + 92]
@@ -244,17 +245,36 @@ fn encrypted_apple_peer_decodes_real_hevc_and_preserves_input_and_hello_gates() 
                 .unwrap();
             video_socket.send_to(&wire, (peer.ip(), port + 1)).unwrap();
         }
+        let mut audio_sender = SrtpSender::new(&audio_key, 0x5678);
+        let mut audio = &include_bytes!("../../tests/data/apple-aac-eld-stereo.aaceld")[..];
+        let mut timestamp = 0u32;
+        while !audio.is_empty() {
+            let size = usize::from(u16::from_be_bytes([audio[0], audio[1]]));
+            let wire = audio_sender
+                .packet(&audio[2..size + 2], timestamp, 101, false)
+                .unwrap();
+            control_socket.send_to(&wire, (peer.ip(), port)).unwrap();
+            audio = &audio[size + 2..];
+            timestamp += 900;
+        }
         let mut pointer = false;
         let mut key = false;
-        while !(pointer && key) {
+        let mut wheel = Vec::new();
+        while !(pointer && key && wheel.len() == 10) {
             let message = read_record(&mut socket, &mut cipher);
             match message.first() {
                 Some(0x10) => {
                     assert_eq!(message.len(), 18);
                     let mut block: [u8; 16] = message[2..].try_into().unwrap();
                     aes::Aes128::new((&[21; 16]).into()).decrypt_block((&mut block).into());
-                    assert_eq!(&block[10..], &[0xff, 2, 0, 32, 0, 24]);
-                    pointer = true;
+                    assert_eq!(block[10], 0xff);
+                    assert_eq!(&block[12..], &[0, 32, 0, 24]);
+                    if pointer {
+                        wheel.push(block[11]);
+                    } else {
+                        assert_eq!(block[11], 2);
+                        pointer = true;
+                    }
                 }
                 Some(4) => {
                     assert_eq!(message, [4, 0, 0, 0, 0, 0, 0xff, 0xeb]);
@@ -263,6 +283,7 @@ fn encrypted_apple_peer_decodes_real_hevc_and_preserves_input_and_hello_gates() 
                 _ => (),
             }
         }
+        assert_eq!(wheel, [10, 2, 10, 2, 10, 2, 34, 2, 34, 2]);
         observed.send(()).unwrap();
         let mut tail = [0];
         let _ = socket.read(&mut tail);
@@ -285,6 +306,10 @@ fn encrypted_apple_peer_decodes_real_hevc_and_preserves_input_and_hello_gates() 
             )),
             streaming: StreamSettings {
                 encoding: Encoding::Hevc30,
+                ..Default::default()
+            },
+            audio: crate::audio::Settings {
+                muted: true,
                 ..Default::default()
             },
             remember: false,
@@ -350,17 +375,38 @@ fn encrypted_apple_peer_decodes_real_hevc_and_preserves_input_and_hello_gates() 
         })
         .unwrap();
     session
+        .send(Command::Scroll {
+            x: 32,
+            y: 24,
+            buttons: 4,
+            steps: crate::input::ScrollSteps::new(2, 3).unwrap(),
+        })
+        .unwrap();
+    session
         .send(Command::Key {
             keysym: 0xffeb,
             down: false,
         })
         .unwrap();
     received.recv_timeout(Duration::from_secs(5)).unwrap();
+    let audio_deadline = Instant::now() + Duration::from_secs(5);
+    while !std::fs::read_to_string(audit.audit().path())
+        .unwrap()
+        .contains("media.audio.first_frame")
+    {
+        assert!(
+            Instant::now() < audio_deadline,
+            "Encrypted native Apple audio did not decode"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
     session.finish().unwrap();
     server.join().unwrap();
     audit.shutdown().unwrap();
     let log = std::fs::read_to_string(audit.audit().path()).unwrap();
     assert!(log.contains("media.hevc.first_frame"));
+    assert!(log.contains("media.audio.first_frame"));
+    assert!(log.contains("media.audio.codec.process.closed"));
     assert!(!log.contains("FixtureOnly"));
     crate::audit::verify(&[audit.audit().path()]).unwrap();
 }

@@ -2,6 +2,7 @@ import { LineEdit, ComboBox, ScrollView, Palette } from "std-widgets.slint";
 import { GlassTheme, GlassPanel, Button, CheckBox, Slider } from "glass.slint";
 import { AboutOverlay } from "about.slint";
 import { ClipboardOverlay } from "clipboard.slint";
+import { AudioOverlay } from "audio.slint";
 import { FilesOverlay, FileRow } from "files.slint";
 
 export struct Machine { name: string, detail: string, saved: bool }
@@ -100,6 +101,12 @@ export component App inherits Window {
     in-out property <bool> files-use-saved;
     in property <bool> files-connected;
     in property <bool> hevc-active;
+    in-out property <bool> audio-open: false;
+    in-out property <bool> audio-muted: false;
+    in-out property <float> audio-volume: 100;
+    in property <bool> audio-codec-missing: false;
+    in property <bool> audio-installing: false;
+    in property <string> audio-status: "Audio is available with HEVC.";
     in property <bool> files-directory-ready;
     in property <bool> files-connecting;
     in property <bool> files-busy;
@@ -114,7 +121,7 @@ export component App inherits Window {
     in property <string> files-error;
     in property <string> files-progress-label;
     in property <float> files-progress;
-    out property <bool> modal-open: quality-open || help-open || about-open || clipboard-open || files-open || update-installing;
+    out property <bool> modal-open: quality-open || help-open || about-open || clipboard-open || files-open || audio-open || update-installing;
     out property <bool> canvas-focused: remote-focus.has-focus;
     in property <bool> update-checking: false;
     in property <bool> update-available: false;
@@ -164,6 +171,9 @@ export component App inherits Window {
     callback save-preferences();
     callback quality-changed();
     callback apply-streaming();
+    callback audio-changed();
+    callback audio-install();
+    callback audio-retry();
     callback reset-streaming();
     callback refresh-desktop();
     callback fullscreen-requested();
@@ -244,6 +254,7 @@ export component App inherits Window {
                 }
                 Rectangle { horizontal-stretch: 1; background: transparent; }
                 Button { text: "Quality"; icon: @image-url("../assets/tune.svg"); accessible-label: "Stream quality"; clicked => { root.quality-open = true; root.release-input(); } }
+                Button { icon: @image-url("../assets/audio.svg"); accessible-label: "Audio playback"; quiet: root.audio-muted; clicked => { root.audio-open = true; root.release-input(); } }
                 Button { icon: @image-url("../assets/clipboard.svg"); accessible-label: "Clipboard sharing"; quiet: true; enabled: root.connected; clicked => { root.clipboard-open = true; root.release-input(); } }
                 Button { text: "Files"; icon: @image-url("../assets/folder.svg"); accessible-label: "Files and SSH clipboard"; quiet: !root.files-connected; enabled: root.connected; clicked => { root.open-files(); } }
                 Button { icon: @image-url("../assets/info.svg"); accessible-label: "About MacCanvas"; quiet: true; clicked => { root.about-open = true; root.release-input(); } }
@@ -557,7 +568,7 @@ export component App inherits Window {
                             LineEdit { accessible-label: "Maximum FPS"; width: 88px; text <=> root.max-fps; input-type: InputType.number; }
                         }
                         CheckBox { text: "Show live FPS counter"; checked <=> root.show-fps; toggled => { root.save-preferences(); } }
-                        Text { text: "FPS counts unique desktop images submitted for display, not monitor refreshes. An idle desktop correctly reads 0 FPS. Traffic measures VNC, HEVC/SRTP and SSH payloads in bits/s, excluding TCP/UDP/VPN overhead."; color: root.muted; font-size: 11px; wrap: word-wrap; }
+                        Text { text: "FPS counts unique desktop images submitted for display, not monitor refreshes. An idle desktop correctly reads 0 FPS. Traffic measures VNC, HEVC/audio SRTP and SSH payloads in bits/s, excluding TCP/UDP/VPN overhead."; color: root.muted; font-size: 11px; wrap: word-wrap; }
                     }
                     if root.help-open : VerticalLayout {
                         spacing: 16px; padding-right: 8px;
@@ -570,7 +581,7 @@ export component App inherits Window {
                             Rectangle { height: 1px; background: root.outline; }
                         }
                         Text {
-                            text: "Standard VNC offers CopyRect and a Raw fallback; the Mac may ignore compression/JPEG hints. HEVC uses Apple's separate High Performance transport with encrypted control, SRTP video and a bundled native decoder. It requires Mac account login and UDP on the VNC port and the next port. H.264 playback is not supported.";
+                            text: "Standard VNC offers CopyRect and a Raw fallback; the Mac may ignore compression/JPEG hints. HEVC uses Apple's separate High Performance transport with encrypted control, SRTP video and optional audio. Video decoding is bundled; audio uses a separate converter. Mac account login and UDP on the VNC port and the next port are required. H.264 playback is not supported.";
                             color: root.muted; font-size: 12px; wrap: word-wrap;
                         }
                     }
@@ -582,6 +593,15 @@ export component App inherits Window {
                 }
             }
         }
+    }
+    if root.audio-open : AudioOverlay {
+        supported: root.hevc-active; connected: root.connected; missing: root.audio-codec-missing;
+        installing: root.audio-installing; status: root.audio-status;
+        muted <=> root.audio-muted; volume <=> root.audio-volume;
+        changed => { root.audio-changed(); }
+        install => { root.audio-install(); }
+        retry => { root.audio-retry(); }
+        close => { root.audio-open = false; if root.connected { root.focus-canvas(); } }
     }
     if root.about-open : AboutOverlay {
         version: root.app-version; build-date: root.build-date; revision: root.build-revision;

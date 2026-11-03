@@ -1,4 +1,4 @@
-mod windows;
+pub(crate) mod windows;
 
 use std::{
     fs::{self, OpenOptions},
@@ -579,6 +579,7 @@ pub fn error_type(error: &Error) -> &'static str {
         Error::Consent(_) => "windows_hello",
         Error::Configuration(_) => "configuration",
         Error::Display(_) => "display",
+        Error::Audio { .. } => "audio",
         Error::Update(_) => "update",
         Error::UpdateRecovery(_) => "update_recovery",
         Error::Audit(_) => "audit",
@@ -601,6 +602,7 @@ pub fn error_attributes(error: &Error) -> Value {
             attributes["error.code"] = json!(code);
             attributes["sftp.status_code"] = json!(code);
         }
+        Error::Audio { code, .. } => attributes["error.code"] = json!(code),
         _ => (),
     }
     attributes

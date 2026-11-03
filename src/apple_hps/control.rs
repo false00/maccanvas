@@ -285,15 +285,31 @@ impl Channel {
         Ok(())
     }
 
+    fn pointer(&mut self, x: u16, y: u16, buttons: u8, backing: Extent) -> Result<()> {
+        let mask = (buttons & !6) | ((buttons & 2) << 1) | ((buttons & 4) >> 1);
+        let data = self.cipher.pointer(
+            x.min((backing.width - 1) as u16),
+            y.min((backing.height - 1) as u16),
+            mask,
+        );
+        self.send(&data)
+    }
+
     pub fn input(&mut self, command: Command, _scaled: Extent, backing: Extent) -> Result<()> {
+        if let Command::Scroll {
+            x,
+            y,
+            buttons,
+            steps,
+        } = command
+        {
+            for buttons in steps.buttons(buttons) {
+                self.pointer(x, y, buttons, backing)?;
+            }
+            return Ok(());
+        }
         if let Command::Pointer { x, y, buttons } = command {
-            let mask = (buttons & !6) | ((buttons & 2) << 1) | ((buttons & 4) >> 1);
-            let data = self.cipher.pointer(
-                x.min((backing.width - 1) as u16),
-                y.min((backing.height - 1) as u16),
-                mask,
-            );
-            return self.send(&data);
+            return self.pointer(x, y, buttons, backing);
         }
         let mut data = Zeroizing::new(Vec::new());
         command.write(&mut *data)?;

@@ -1,4 +1,5 @@
 //! Native Apple High Performance transport, ported from iShareScreen (AGPL-3.0-or-later).
+mod audio;
 mod bplist;
 mod control;
 mod crypto;
@@ -10,6 +11,7 @@ mod tests;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     net::{SocketAddr, TcpStream, UdpSocket},
+    path::PathBuf,
     sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
 };
@@ -19,6 +21,7 @@ use socket2::SockRef;
 use zeroize::Zeroizing;
 
 use crate::{
+    audio::{Settings as AudioSettings, Status as AudioStatus},
     audit::{Level, Scope},
     auth::Credentials,
     error::{Error, Result},
@@ -68,6 +71,10 @@ fn send_udp(
 
 pub struct Client {
     pub info: ServerInfo,
+    audio: Option<audio::Service>,
+    audio_pending: VecDeque<AudioStatus>,
+    audio_settings: AudioSettings,
+    converter: Option<PathBuf>,
     channel: Channel,
     control_socket: UdpSocket,
     video_socket: UdpSocket,
@@ -120,6 +127,7 @@ impl Client {
         sixty_fps: bool,
         maximum_fps: u16,
         scope: Scope,
+        audio_settings: AudioSettings,
     ) -> Result<Self> {
         if !(1..=120).contains(&maximum_fps) {
             return Err(failed("maximum FPS must be 1-120"));
@@ -147,7 +155,28 @@ impl Client {
             Level::Info,
             json!({"network.encrypted":true,"media.physical.width":info.size.width,"media.physical.height":info.size.height}),
         )?;
-        let offers = Offers::new()?;
+        audio_settings.validate()?;
+        let mut audio_pending = VecDeque::new();
+        let converter = match crate::audio::codec_available() {
+            Ok(path) => {
+                if path.is_none() {
+                    audio_pending.push_back(AudioStatus::CodecMissing(
+                        "Enable audio to install the optional codec component.".into(),
+                    ));
+                }
+                path
+            }
+            Err(error) => {
+                scope.critical(
+                    "media.audio.component.rejected",
+                    Level::Error,
+                    crate::audit::error_attributes(&error),
+                )?;
+                audio_pending.push_back(AudioStatus::CodecMissing(error.to_string()));
+                None
+            }
+        };
+        let offers = Offers::new(converter.is_some())?;
         let configuration = offers.configuration(sixty_fps)?;
         scope.critical("media.hevc.offer.requested",Level::Info,json!({"media.codec.name":"hevc","media.tiles_per_frame":1,"media.requested_fps":if sixty_fps{60}else{30}}))?;
         let mut early = VecDeque::new();
@@ -202,8 +231,12 @@ impl Client {
         let heartbeat = SrtpSender::new(&offers.audio_send, offers.audio_ssrc);
         let decoder = native_hevc::Decoder::new().map_err(failed)?;
         let now = Instant::now();
-        Ok(Self {
+        let mut client = Self {
             info,
+            audio: None,
+            audio_pending,
+            audio_settings,
+            converter,
             channel,
             control_socket,
             video_socket,
@@ -249,11 +282,78 @@ impl Client {
             last_stats: now,
             authenticated: 0,
             nal_types: HashMap::new(),
-        })
+        };
+        client.start_audio()?;
+        Ok(client)
+    }
+
+    fn start_audio(&mut self) -> Result<()> {
+        self.audio.take();
+        let Some(converter) = &self.converter else {
+            return Ok(());
+        };
+        match audio::Service::start(
+            &self.control_socket,
+            self.control_peer,
+            &self.offers.audio_receive,
+            self.audio_settings,
+            self.counters.clone(),
+            self.scope.clone(),
+            converter,
+        ) {
+            Ok(service) => {
+                self.audio = Some(service);
+                self.audio_pending.push_back(AudioStatus::Waiting);
+            }
+            Err(error) => {
+                self.scope.critical(
+                    "media.audio.failed",
+                    Level::Error,
+                    crate::audit::error_attributes(&error),
+                )?;
+                self.audio_pending
+                    .push_back(AudioStatus::Unavailable(error.to_string()));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn audio_status(&mut self) -> Result<Option<AudioStatus>> {
+        if let Some(status) = self.audio_pending.pop_front() {
+            return Ok(Some(status));
+        }
+        match self.audio.as_mut().map(audio::Service::status).transpose() {
+            Ok(status) => Ok(status.flatten()),
+            Err(error) => {
+                self.audio.take();
+                self.scope.critical(
+                    "media.audio.failed",
+                    Level::Error,
+                    crate::audit::error_attributes(&error),
+                )?;
+                Ok(Some(AudioStatus::Unavailable(error.to_string())))
+            }
+        }
     }
 
     pub fn input(&mut self, command: Command) -> Result<()> {
         match command {
+            Command::Audio(settings) => {
+                settings.validate()?;
+                self.audio_settings = settings;
+                if let Some(service) = &self.audio
+                    && let Err(error) = service.configure(settings)
+                {
+                    self.scope.critical(
+                        "media.audio.failed",
+                        Level::Error,
+                        crate::audit::error_attributes(&error),
+                    )?;
+                    self.audio_pending
+                        .push_back(AudioStatus::Unavailable(error.to_string()));
+                }
+                Ok(())
+            }
             Command::Refresh { .. } => self.request_keyframe(),
             Command::Configure(settings) => {
                 settings.validate()?;
@@ -359,7 +459,8 @@ impl Client {
         self.scope.critical("media.hevc.offer.renegotiated",Level::Info,json!({
             "media.codec.requested":"hevc","media.codec.observed":"h264","media.proposal.bank":123,
         }))?;
-        self.offers = Offers::with_bank(true)?;
+        self.audio.take();
+        self.offers = Offers::with_bank(true, self.converter.is_some())?;
         self.configuration = self.offers.configuration(self.fps_ceiling == 60)?;
         self.receiver = Srtp::new(&self.offers.video_receive);
         self.feedback = Srtcp::new(&self.offers.video_send);
@@ -374,7 +475,8 @@ impl Client {
         self.need_keyframe = true;
         self.alternate_bank = true;
         self.video_started = now;
-        self.channel.send(&self.configuration)
+        self.channel.send(&self.configuration)?;
+        self.start_audio()
     }
 
     pub fn poll(&mut self) -> Result<Option<Framebuffer>> {
@@ -447,17 +549,19 @@ impl Client {
                 Err(error) => return Err(error.into()),
             }
         }
-        for _ in 0..128 {
-            match self.control_socket.recv_from(&mut buffer) {
-                Ok((length, peer)) if peer == self.control_peer => {
-                    self.counters
-                        .received
-                        .fetch_add(length as u64, Ordering::Relaxed);
+        if self.audio.as_ref().is_none_or(|audio| !audio.receiving()) {
+            for _ in 0..128 {
+                match self.control_socket.recv_from(&mut buffer) {
+                    Ok((length, peer)) if peer == self.control_peer => {
+                        self.counters
+                            .received
+                            .fetch_add(length as u64, Ordering::Relaxed);
+                    }
+                    Ok(_) => (),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
+                    Err(error) => return Err(error.into()),
                 }
-                Ok(_) => (),
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
-                Err(error) => return Err(error.into()),
             }
         }
         if self.selected.is_none() && now >= self.selection_at && !self.counts.is_empty() {

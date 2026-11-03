@@ -5,7 +5,7 @@ param(
     [int]$SshPort,
     [string]$SshFingerprint,
     [ValidateSet('auto', 'hevc30', 'hevc60')][string]$StreamMode = 'auto',
-    [ValidateSet('connect', 'bounds', 'fullscreen', 'exit-fullscreen', 'disconnect', 'cancel', 'switch-stream', 'focus', 'toggle-sidebar', 'telemetry', 'quality', 'manual-quality', 'close-quality', 'show-macs', 'new', 'saved-login-check', 'panels', 'ssh-dialogs')][string]$Action = 'bounds'
+    [ValidateSet('connect', 'bounds', 'fullscreen', 'exit-fullscreen', 'disconnect', 'cancel', 'switch-stream', 'focus', 'toggle-sidebar', 'telemetry', 'quality', 'manual-quality', 'close-quality', 'show-macs', 'new', 'saved-login-check', 'panels', 'ssh-dialogs', 'audio-settings', 'audio-vnc', 'enable-audio')][string]$Action = 'bounds'
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient
@@ -53,6 +53,39 @@ function Set-FixtureStreamMode([string]$Mode) {
     }
 }
 switch ($Action) {
+    'enable-audio' {
+        (Find-FixtureElement 'Audio playback' ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+        $button = Find-FixtureElement 'Enable audio' ([Windows.Automation.ControlType]::Button)
+        if (-not $button.Current.IsEnabled) { throw 'The optional audio component must be available to install.' }
+        $button.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+        (Find-FixtureElement 'Done' ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+    }
+    'audio-settings' {
+        (Find-FixtureElement 'Audio playback' ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+        $mute = Find-FixtureElement 'Mute Mac audio' ([Windows.Automation.ControlType]::CheckBox)
+        $toggle = $mute.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern)
+        if ($toggle.Current.ToggleState -ne [Windows.Automation.ToggleState]::Off) { throw 'New audio preferences must start unmuted.' }
+        $toggle.Toggle()
+        $volume = (Find-FixtureElement 'Audio volume' ([Windows.Automation.ControlType]::Slider)).
+            GetCurrentPattern([Windows.Automation.RangeValuePattern]::Pattern)
+        if ($volume.Current.Value -ne 100) { throw 'New audio volume must start at 100 percent.' }
+        $volume.SetValue(37)
+        (Find-FixtureElement 'Done' ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+    }
+    'audio-vnc' {
+        (Find-FixtureElement 'Audio playback' ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+        $null = Find-FixtureElement 'Standard VNC does not carry audio. Choose HEVC / H.265 in Quality to hear your Mac.' ([Windows.Automation.ControlType]::Text)
+        foreach ($name in @('Mute Mac audio', 'Audio volume')) {
+            if ((Find-FixtureElement $name $null).Current.IsEnabled) { throw 'Classic VNC must not expose active audio controls.' }
+        }
+        (Find-FixtureElement 'Done' ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+    }
     'switch-stream' {
         (Find-FixtureElement 'Stream quality' ([Windows.Automation.ControlType]::Button)).
             GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()

@@ -127,6 +127,8 @@ pub struct Settings {
     #[serde(default)]
     pub streaming: StreamSettings,
     #[serde(default)]
+    pub audio: crate::audio::Settings,
+    #[serde(default)]
     pub clipboard_enabled: bool,
     #[serde(default)]
     pub ssh_host_keys: Vec<SshHostKey>,
@@ -147,6 +149,7 @@ impl Default for Settings {
             sidebar_open: true,
             show_fps: true,
             streaming: StreamSettings::default(),
+            audio: crate::audio::Settings::default(),
             clipboard_enabled: false,
             ssh_host_keys: Vec::new(),
         }
@@ -156,6 +159,7 @@ impl Default for Settings {
 impl Settings {
     pub fn validate(&self) -> Result<()> {
         self.streaming.validate()?;
+        self.audio.validate()?;
         if self.version != 1 || self.profiles.len() > 128 || self.ssh_host_keys.len() > 128 {
             return Err(Error::Configuration(
                 "Unsupported settings version or too many machines".into(),
