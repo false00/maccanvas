@@ -149,6 +149,8 @@ export component App inherits Window {
     in-out property <float> jpeg-quality: 8;
     in-out property <bool> manual-bandwidth: false;
     in-out property <string> target-mbps: "10";
+    in-out property <bool> manual-hevc-bitrate: false;
+    in-out property <string> hevc-mbps: "60";
     in-out property <string> max-fps: "60";
     in property <string> encoding-description;
     in property <string> bandwidth-description: "Default: HEVC / H.265, adaptive bitrate, up to 60 FPS.";
@@ -585,11 +587,16 @@ export component App inherits Window {
                             Slider { accessible-label: "JPEG quality"; minimum: 0; maximum: 9; step: 1; value <=> root.jpeg-quality; }
                         }
                         if root.encoding-index >= 2 : CheckBox { text: "Use a manual bandwidth target"; checked <=> root.manual-bandwidth; }
+                        if root.encoding-index < 2 : CheckBox { text: "Use a manual HEVC bitrate ceiling"; checked <=> root.manual-hevc-bitrate; }
+                        if root.manual-hevc-bitrate && root.encoding-index < 2 : HorizontalLayout {
+                            Caption { text: "HEVC bitrate (Mbps)"; }
+                            LineEdit { accessible-label: "HEVC bitrate Mbps"; text <=> root.hevc-mbps; input-type: InputType.decimal; }
+                        }
                         if root.manual-bandwidth && root.encoding-index >= 2 : HorizontalLayout {
                             Caption { text: "Target (Mbps)"; }
                             LineEdit { accessible-label: "Bandwidth target Mbps"; text <=> root.target-mbps; input-type: InputType.decimal; }
                         }
-                        Text { text: root.encoding-index < 2 ? "HEVC negotiates adaptive video over encrypted UDP. Compression, JPEG quality and the VNC bandwidth target do not apply. The limit below can reduce the local display rate. Apply reconnects automatically when changing transports or HEVC presets; saved logins require Windows Hello again." : "Automatic means no bandwidth target. A manual target spaces screen requests based on received bytes; bursts can exceed it. Apply reconnects automatically when switching to or from HEVC. Other VNC changes apply live."; color: root.muted; font-size: 12px; wrap: word-wrap; }
+                        Text { text: root.encoding-index < 2 ? "Adaptive bitrate is the default. A manual ceiling requests your chosen Mbps from the Mac; static screens and encoder limits can lower the actual rate, and bursts may exceed it. Compression, JPEG quality and the VNC bandwidth target do not apply. Apply reconnects when changing transports, HEVC presets or the bitrate ceiling; saved logins require Windows Hello again." : "Automatic means no bandwidth target. A manual target spaces screen requests based on received bytes; bursts can exceed it. Apply reconnects automatically when switching to or from HEVC. Other VNC changes apply live."; color: root.muted; font-size: 12px; wrap: word-wrap; }
                         HorizontalLayout {
                             Caption { text: "Frame rate limit"; }
                             LineEdit { accessible-label: "Maximum FPS"; width: 88px; text <=> root.max-fps; input-type: InputType.number; }

@@ -40,7 +40,9 @@ pub enum Event {
         point_scale: f32,
     },
     Error(String),
-    Disconnected,
+    Disconnected {
+        reconnect: bool,
+    },
 }
 
 pub struct Request {
@@ -103,7 +105,7 @@ pub struct Session {
     pub counters: Arc<Counters>,
     audit: Scope,
     worker: Option<thread::JoinHandle<()>>,
-    encoding: crate::streaming::Encoding,
+    streaming: StreamSettings,
 }
 
 enum WriterCommand {
@@ -142,7 +144,8 @@ impl Session {
             .streaming
             .validate_authentication(request.profile.authentication)?;
         request.audio.validate()?;
-        let encoding = request.streaming.encoding;
+        let streaming = request.streaming;
+        let encoding = streaming.encoding;
         request.audit.critical("session.connection.requested", Level::Info, json!({
             "server.address": request.profile.host, "server.port": request.profile.port,
             "network.transport": "tcp", "network.protocol.name": "rfb",
@@ -178,6 +181,9 @@ impl Session {
                     &worker_control,
                     traffic,
                 );
+                let reconnect = encoding.is_hevc()
+                    && !worker_control.cancelled.load(Ordering::Acquire)
+                    && matches!(&outcome, Err(Error::Io(_) | Error::ConnectionLost(_)));
                 if let Err(error) = &outcome
                     && events
                         .send((generation, Event::Error(error.to_string())))
@@ -205,7 +211,10 @@ impl Session {
                 if let Err(error) = worker_control.close() {
                     eprintln!("MacCanvas shutdown failed: {error}");
                 }
-                if events.send((generation, Event::Disconnected)).is_err() {
+                if events
+                    .send((generation, Event::Disconnected { reconnect }))
+                    .is_err()
+                {
                     eprintln!("MacCanvas connection window has closed");
                 }
             })?;
@@ -215,7 +224,7 @@ impl Session {
             counters,
             audit,
             worker: Some(worker),
-            encoding,
+            streaming,
         })
     }
 
@@ -230,18 +239,18 @@ impl Session {
             && self.requires_reconnect(settings)
         {
             return Err(Error::Configuration(
-                "Changing transports or HEVC presets requires restarting the stream".into(),
+                "Changing transports, HEVC presets or the HEVC bitrate ceiling requires restarting the stream".into(),
             ));
         }
         self.post(WriterCommand::Input(command))
     }
 
     pub fn uses_hevc(&self) -> bool {
-        self.encoding.is_hevc()
+        self.streaming.encoding.is_hevc()
     }
 
     pub fn requires_reconnect(&self, settings: StreamSettings) -> bool {
-        self.encoding.requires_reconnect(settings.encoding)
+        self.streaming.requires_reconnect(settings)
     }
 
     fn post(&self, command: WriterCommand) -> Result<()> {
@@ -266,6 +275,10 @@ impl Session {
 
     pub fn close(&self) -> Result<()> {
         self.control.close()
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.control.cancelled.load(Ordering::Acquire)
     }
 
     pub fn share_clipboard(&self, enabled: bool) -> Result<()> {

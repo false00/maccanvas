@@ -3,14 +3,6 @@
 slint::include_modules!();
 mod app;
 
-#[allow(non_upper_case_globals)]
-#[unsafe(no_mangle)]
-pub static NvOptimusEnablement: u32 = 1;
-
-#[allow(non_upper_case_globals)]
-#[unsafe(no_mangle)]
-pub static AmdPowerXpressRequestHighPerformance: u32 = 1;
-
 fn start() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = std::env::args().skip(1);
     let mut data_directory = None;

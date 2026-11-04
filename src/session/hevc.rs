@@ -16,7 +16,6 @@ use crate::{
     credentials::{self, AuditedConsent, AuditedVault, CredentialStore},
     error::{Error, Result},
     protocol,
-    streaming::Encoding,
     telemetry::{Counters, Metered},
 };
 
@@ -76,8 +75,7 @@ pub(super) fn run(
     let mut client = apple_hps::Client::open(
         stream,
         &credentials,
-        request.streaming.encoding == Encoding::Hevc60,
-        request.streaming.max_fps,
+        request.streaming,
         request.audit.clone(),
         request.audio,
         request.window != 0,

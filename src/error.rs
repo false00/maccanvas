@@ -4,6 +4,8 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("VNC protocol error: {0}")]
     Protocol(String),
+    #[error("Connection interrupted: {0}")]
+    ConnectionLost(String),
     #[error("{0}")]
     Authentication(String),
     #[error("Windows Credential Manager: {0}")]

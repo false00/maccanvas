@@ -25,6 +25,8 @@ use crate::{
 
 use super::crypto::{Records, SrtpSender};
 
+static PEER_TEST: Mutex<()> = Mutex::new(());
+
 const SAMPLE: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "\\crates\\native-hevc\\tests\\data\\pattern444.hevc"
@@ -110,7 +112,7 @@ fn media_answer() -> Vec<u8> {
     Value::Dictionary(dictionary)
         .to_writer_binary(&mut plist)
         .unwrap();
-    let mut combined = super::offers::Offers::new(false).unwrap().audio;
+    let mut combined = super::offers::Offers::new(false, 0).unwrap().audio;
     combined.extend_from_slice(&[17; 92]);
     combined.extend_from_slice(&plist);
     plist = combined;
@@ -142,6 +144,16 @@ fn media_answer() -> Vec<u8> {
 
 #[test]
 fn encrypted_apple_peer_decodes_real_hevc_and_preserves_input_and_hello_gates() {
+    encrypted_apple_peer(false);
+}
+
+#[test]
+fn unexpected_hevc_control_disconnect_requests_automatic_reconnect() {
+    encrypted_apple_peer(true);
+}
+
+fn encrypted_apple_peer(drop_connection: bool) {
+    let _peer_test = PEER_TEST.lock().unwrap();
     let directory = tempfile::tempdir().unwrap();
     let mut audit = Audit::start(directory.path().join("audit")).unwrap();
     let listener = TcpListener::bind(("127.0.0.2", 0)).unwrap();
@@ -150,6 +162,7 @@ fn encrypted_apple_peer_decodes_real_hevc_and_preserves_input_and_hello_gates() 
     let video_socket = UdpSocket::bind(("127.0.0.2", port + 1)).unwrap();
     let control_socket = UdpSocket::bind(("127.0.0.2", port)).unwrap();
     let (observed, received) = mpsc::channel();
+    let (shutdown, shutdown_requested) = mpsc::channel();
     let private = RsaPrivateKey::new(&mut rand::rngs::OsRng, 2048).unwrap();
     let public = private.to_public_key().to_public_key_der().unwrap();
     let server = thread::spawn(move || {
@@ -292,7 +305,31 @@ fn encrypted_apple_peer_decodes_real_hevc_and_preserves_input_and_hello_gates() 
             }
         }
         assert_eq!(wheel, [10, 2, 10, 2, 10, 2, 34, 2, 34, 2]);
+        video_socket.set_nonblocking(true).unwrap();
+        let mut keepalive = [0; 4];
+        loop {
+            match video_socket.recv_from(&mut keepalive) {
+                Ok(_) => (),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("Cannot drain startup video keepalives: {error}"),
+            }
+        }
+        video_socket.set_nonblocking(false).unwrap();
+        video_socket
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        for _ in 0..2 {
+            let (length, sender) = video_socket.recv_from(&mut keepalive).unwrap();
+            assert_eq!(sender, std::net::SocketAddr::new(peer.ip(), port + 1));
+            assert_eq!(&keepalive[..length], &[0]);
+        }
         observed.send(()).unwrap();
+        if shutdown_requested
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap()
+        {
+            return;
+        }
         let mut tail = [0];
         let _ = socket.read(&mut tail);
     });
@@ -314,6 +351,7 @@ fn encrypted_apple_peer_decodes_real_hevc_and_preserves_input_and_hello_gates() 
             )),
             streaming: StreamSettings {
                 encoding: Encoding::Hevc30,
+                hevc_bitrate_bps: 125_500_000,
                 ..Default::default()
             },
             audio: crate::audio::Settings {
@@ -380,6 +418,20 @@ fn encrypted_apple_peer_decodes_real_hevc_and_preserves_input_and_hello_gates() 
         super::COUNTER_ENCODING
     );
     assert!(session.share_clipboard(true).is_err());
+    let live_settings = StreamSettings {
+        encoding: Encoding::Hevc30,
+        hevc_bitrate_bps: 125_500_000,
+        max_fps: 20,
+        ..Default::default()
+    };
+    assert!(!session.requires_reconnect(live_settings));
+    session.send(Command::Configure(live_settings)).unwrap();
+    let changed_bitrate = StreamSettings {
+        hevc_bitrate_bps: 125_500_001,
+        ..live_settings
+    };
+    assert!(session.requires_reconnect(changed_bitrate));
+    assert!(session.send(Command::Configure(changed_bitrate)).is_err());
     assert!(
         session
             .send(Command::Configure(StreamSettings {
@@ -410,6 +462,7 @@ fn encrypted_apple_peer_decodes_real_hevc_and_preserves_input_and_hello_gates() 
         })
         .unwrap();
     received.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(!session.is_closed());
     let audio_deadline = Instant::now() + Duration::from_secs(5);
     while !std::fs::read_to_string(audit.audit().path())
         .unwrap()
@@ -421,7 +474,35 @@ fn encrypted_apple_peer_decodes_real_hevc_and_preserves_input_and_hello_gates() 
         );
         thread::sleep(Duration::from_millis(5));
     }
+    shutdown.send(drop_connection).unwrap();
+    if drop_connection {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut failure_reported = false;
+        loop {
+            match receiver
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap()
+                .1
+            {
+                Event::Error(_) => failure_reported = true,
+                Event::Disconnected { reconnect } => {
+                    assert!(reconnect);
+                    assert!(failure_reported);
+                    assert!(session.is_closed());
+                    break;
+                }
+                _ => (),
+            }
+        }
+    }
     session.finish().unwrap();
+    if !drop_connection {
+        assert!(
+            receiver
+                .try_iter()
+                .any(|(_, event)| { matches!(event, Event::Disconnected { reconnect: false }) })
+        );
+    }
     server.join().unwrap();
     audit.shutdown().unwrap();
     let log = std::fs::read_to_string(audit.audit().path()).unwrap();
@@ -430,4 +511,67 @@ fn encrypted_apple_peer_decodes_real_hevc_and_preserves_input_and_hello_gates() 
     assert!(log.contains("media.audio.codec.process.closed"));
     assert!(!log.contains("FixtureOnly"));
     crate::audit::verify(&[audit.audit().path()]).unwrap();
+}
+
+#[test]
+fn static_desktop_metadata_never_arms_the_picture_watchdog() {
+    let now = Instant::now();
+    let mut watchdog = super::VideoWatchdog::default();
+    for tick in 0..=240 {
+        let at = now + Duration::from_millis(tick * 500);
+        watchdog.packet(at);
+        assert_eq!(watchdog.action(at), super::VideoAction::Wait);
+    }
+    assert_eq!(
+        watchdog.action(now + Duration::from_secs(3600)),
+        super::VideoAction::Wait
+    );
+}
+
+#[test]
+fn video_resuming_after_a_long_idle_gets_a_full_recovery_window() {
+    let now = Instant::now();
+    let mut watchdog = super::VideoWatchdog::default();
+    watchdog.packet(now);
+    watchdog.expect_picture(now);
+    watchdog.decoded();
+    let resumed = now + Duration::from_secs(3600);
+    for tick in 0..=62 {
+        let at = resumed + Duration::from_millis(tick * 500);
+        watchdog.packet(at);
+        watchdog.expect_picture(at);
+        let expected = match tick {
+            0..=20 => super::VideoAction::Wait,
+            21..=60 => super::VideoAction::Recover,
+            _ => super::VideoAction::Reconnect,
+        };
+        assert_eq!(watchdog.action(at), expected, "tick {tick}");
+    }
+    watchdog.decoded();
+    assert_eq!(
+        watchdog.action(resumed + Duration::from_secs(31)),
+        super::VideoAction::Wait
+    );
+}
+
+#[test]
+fn a_quiet_encoder_suspends_recovery_and_resuming_video_restarts_its_grace_period() {
+    let now = Instant::now();
+    let mut watchdog = super::VideoWatchdog::default();
+    watchdog.packet(now);
+    watchdog.expect_picture(now);
+    for tick in 1..=22 {
+        watchdog.packet(now + Duration::from_millis(tick * 500));
+    }
+    assert_eq!(
+        watchdog.action(now + Duration::from_secs(11)),
+        super::VideoAction::Recover
+    );
+    assert_eq!(
+        watchdog.action(now + Duration::from_secs(12)),
+        super::VideoAction::Wait
+    );
+    let resumed = now + Duration::from_secs(3600);
+    watchdog.packet(resumed);
+    assert_eq!(watchdog.action(resumed), super::VideoAction::Wait);
 }

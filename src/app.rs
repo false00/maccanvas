@@ -30,7 +30,7 @@ use maccanvas::{
     profiles::{self, AuthMode, Profile, Settings},
     render::{Job, Renderer},
     session::{Event, Frames, Request, Session},
-    streaming::{Encoding, StreamSettings, encoding_name, raw_estimate},
+    streaming::{Encoding, StreamSettings, encoding_name, parse_hevc_bitrate_mbps, raw_estimate},
     telemetry::{self, Monitor},
     theme,
     updates::{self, Updater},
@@ -41,6 +41,11 @@ use crate::{App, CodecGuide, Machine, TrafficBar};
 struct Reconnect {
     profile: Profile,
     credentials: CredentialSource,
+    retry_at: Instant,
+}
+
+fn reconnect_delay(attempt: u32) -> Duration {
+    Duration::from_secs((1_u64 << attempt.saturating_sub(1).min(5)).min(30))
 }
 
 struct State {
@@ -52,6 +57,7 @@ struct State {
     connection_profile: Option<Profile>,
     connection_credentials: Option<CredentialSource>,
     reconnect: Option<Reconnect>,
+    reconnect_attempt: u32,
     files: files_ui::Files,
     retired: Vec<Session>,
     audit: Scope,
@@ -134,7 +140,7 @@ impl State {
         let keys: Vec<_> = self.keys.drain().map(|(_, value)| value).collect();
         let modifiers = std::mem::take(&mut self.modifiers);
         let buttons = std::mem::take(&mut self.buttons);
-        if self.session.is_none() {
+        if self.session.as_ref().is_none_or(Session::is_closed) {
             return Ok(());
         }
         for keysym in keys {
@@ -497,6 +503,7 @@ fn close_stream(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
         state.last_displayed_frame = 0;
         state.connection_credentials = None;
         state.reconnect = None;
+        state.reconnect_attempt = 0;
         state.audio_restart = false;
         state.clipboard = native::Watcher::default();
         state.pending_clipboard = None;
@@ -661,6 +668,7 @@ fn apply_streaming(
             Some(Reconnect {
                 profile,
                 credentials,
+                retry_at: Instant::now(),
             })
         } else {
             None
@@ -680,13 +688,73 @@ fn apply_streaming(
     };
     if let Some(reconnect) = reconnect {
         close_stream(app, state)?;
-        state.borrow_mut().reconnect = Some(reconnect);
+        {
+            let mut state = state.borrow_mut();
+            state.reconnect = Some(reconnect);
+            state.reconnect_attempt = 1;
+        }
         app.set_connecting(true);
         app.set_status(format!("Switching to {}...", settings.encoding.label()).into());
     }
     stream_summary(app, settings);
     app.set_quality_open(false);
     app.set_error_text("".into());
+    Ok(())
+}
+
+fn connection_ended(app: &App, state: &Rc<RefCell<State>>, retryable: bool) -> Result<()> {
+    let pending = {
+        let state = state.borrow();
+        if retryable
+            && (app.get_connected() || state.reconnect_attempt != 0)
+            && state.session.as_ref().is_some_and(Session::uses_hevc)
+            && state.audit.audit().failure().is_none()
+        {
+            let attempt = state.reconnect_attempt.saturating_add(1);
+            let delay = reconnect_delay(attempt);
+            let profile = state.connection_profile.clone().ok_or_else(|| {
+                Error::Protocol("The interrupted connection profile is unavailable".into())
+            })?;
+            let credentials = state.connection_credentials.clone().ok_or_else(|| {
+                Error::Credential("The interrupted connection cannot be restarted".into())
+            })?;
+            state.audit.critical(
+                "session.reconnect.scheduled",
+                Level::Warn,
+                json!({
+                    "profile.id":profile.id, "session.reconnect.reason":"connection_interrupted",
+                    "session.reconnect.attempt":attempt, "session.reconnect.delay_ms":delay.as_millis() as u64,
+                }),
+            )?;
+            Some((
+                Reconnect {
+                    profile,
+                    credentials,
+                    retry_at: Instant::now() + delay,
+                },
+                attempt,
+                delay,
+            ))
+        } else {
+            None
+        }
+    };
+    disconnect(app, state)?;
+    if let Some((pending, attempt, delay)) = pending {
+        {
+            let mut state = state.borrow_mut();
+            state.reconnect = Some(pending);
+            state.reconnect_attempt = attempt;
+        }
+        app.set_connecting(true);
+        app.set_status(
+            format!(
+                "Connection interrupted. Reconnecting in {}s (attempt {attempt}); Cancel to stop.",
+                delay.as_secs()
+            )
+            .into(),
+        );
+    }
     Ok(())
 }
 
@@ -697,7 +765,12 @@ fn tick_reconnect(
 ) -> Result<()> {
     let pending = {
         let mut state = state.borrow_mut();
-        if state.retired.is_empty() {
+        if state.retired.is_empty()
+            && state
+                .reconnect
+                .as_ref()
+                .is_some_and(|pending| Instant::now() >= pending.retry_at)
+        {
             state.reconnect.take()
         } else {
             None
@@ -790,6 +863,15 @@ fn stream_form(app: &App, settings: StreamSettings) {
     app.set_compression_level(f32::from(settings.compression));
     app.set_jpeg_quality(f32::from(settings.jpeg_quality));
     app.set_manual_bandwidth(settings.target_kbps != 0);
+    app.set_manual_hevc_bitrate(settings.hevc_bitrate_bps != 0);
+    app.set_hevc_mbps(
+        if settings.hevc_bitrate_bps == 0 {
+            "60".to_owned()
+        } else {
+            (f64::from(settings.hevc_bitrate_bps) / 1_000_000.0).to_string()
+        }
+        .into(),
+    );
     app.set_target_mbps(
         if settings.target_kbps == 0 {
             "10".to_owned()
@@ -831,6 +913,11 @@ fn read_stream_form(app: &App) -> Result<StreamSettings> {
         compression: app.get_compression_level().round() as u8,
         jpeg_quality: app.get_jpeg_quality().round() as u8,
         target_kbps,
+        hevc_bitrate_bps: if encoding.is_hevc() && app.get_manual_hevc_bitrate() {
+            parse_hevc_bitrate_mbps(&app.get_hevc_mbps())?
+        } else {
+            0
+        },
         max_fps: app
             .get_max_fps()
             .parse::<u16>()
@@ -841,7 +928,12 @@ fn read_stream_form(app: &App) -> Result<StreamSettings> {
 }
 
 fn stream_summary(app: &App, settings: StreamSettings) {
-    let target = if settings.encoding.is_hevc() {
+    let target = if settings.encoding.is_hevc() && settings.hevc_bitrate_bps != 0 {
+        format!(
+            "{} HEVC ceiling",
+            telemetry::rate(f64::from(settings.hevc_bitrate_bps))
+        )
+    } else if settings.encoding.is_hevc() {
         "Adaptive video bitrate".into()
     } else if settings.target_kbps == 0 {
         "Automatic (no target)".into()
@@ -876,7 +968,7 @@ fn guide(app: &App, size: Option<Extent>) {
                 return CodecGuide {
                     name: encoding.label().into(),
                     detail: encoding.description().into(),
-                    estimate: "Adaptive HEVC video: use the live traffic meter. 60 FPS generally costs more bandwidth and CPU than 30 FPS; VNC rectangle-compression ratios do not apply.".into(),
+                    estimate: "HEVC video is adaptive by default, with an optional custom bitrate ceiling. Use the live traffic meter: static screens and encoder limits can lower the actual rate. 60 FPS generally costs more bandwidth and CPU than 30 FPS; VNC rectangle-compression ratios do not apply.".into(),
                 };
             }
             let (low, high) = match encoding {
@@ -1184,6 +1276,7 @@ pub fn run(
         connection_profile: None,
         connection_credentials: None,
         reconnect: None,
+        reconnect_attempt: 0,
         files: files_ui::Files::default(),
         retired: Vec::new(),
         audit,
@@ -1968,6 +2061,7 @@ pub fn run(
                             if credentials_saved {
                                 state.connection_credentials = Some(CredentialSource::Saved);
                             }
+                            state.reconnect_attempt = 0;
                             state.connection_profile = Some(profile.clone());
                             if let Some(index) = state
                                 .settings
@@ -2048,8 +2142,8 @@ pub fn run(
                         app.set_audio_status(description.into());
                     }
                     Event::Error(message) => notify(&app, message),
-                    Event::Disconnected => {
-                        if let Err(error) = disconnect(&app, &timer_state) {
+                    Event::Disconnected { reconnect } => {
+                        if let Err(error) = connection_ended(&app, &timer_state, reconnect) {
                             notify(&app, error);
                         }
                     }
@@ -2061,6 +2155,7 @@ pub fn run(
                     while let Some(index) = state.retired.iter().position(Session::is_finished) {
                         if let Err(error) = state.retired.remove(index).finish() {
                             state.reconnect = None;
+                            state.reconnect_attempt = 0;
                             app.set_connecting(false);
                             return Err(error);
                         }
@@ -2071,6 +2166,7 @@ pub fn run(
                         state.audit_reported = true;
                         let closed = state.session.as_ref().map(Session::close).transpose();
                         state.reconnect = None;
+                        state.reconnect_attempt = 0;
                         state.connection_credentials = None;
                         app.set_connecting(false);
                         state.files.stop(&app);
@@ -2171,4 +2267,19 @@ pub fn run(
         session.finish()?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn continuous_reconnect_backoff_is_capped_but_never_exhausted() {
+        for (attempt, seconds) in [(1, 1), (2, 2), (3, 4), (4, 8), (5, 16), (6, 30)] {
+            assert_eq!(reconnect_delay(attempt), Duration::from_secs(seconds));
+        }
+        for attempt in [7, 100, u32::MAX] {
+            assert_eq!(reconnect_delay(attempt), Duration::from_secs(30));
+        }
+    }
 }

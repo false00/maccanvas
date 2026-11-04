@@ -293,6 +293,18 @@ mod tests {
     }
 
     #[test]
+    fn custom_hevc_bitrate_survives_saving_and_reloading_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let mut settings = Settings::default();
+        for bitrate in [1, 125_500_000, u32::MAX, 0] {
+            settings.streaming.hevc_bitrate_bps = bitrate;
+            settings.save(&path).unwrap();
+            assert_eq!(Settings::load(&path).unwrap().streaming, settings.streaming);
+        }
+    }
+
+    #[test]
     fn rejects_credentials_in_host_urls() {
         let profile = Profile {
             id: Uuid::new_v4(),

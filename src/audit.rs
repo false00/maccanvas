@@ -574,6 +574,7 @@ pub fn error_type(error: &Error) -> &'static str {
     match error {
         Error::Io(_) => "io",
         Error::Protocol(_) => "rfb_protocol",
+        Error::ConnectionLost(_) => "connection_interrupted",
         Error::Authentication(_) => "authentication",
         Error::Credential(_) => "credential_vault",
         Error::Consent(_) => "windows_hello",

@@ -30,6 +30,7 @@ use crate::{
     geometry::Extent,
     input::Command,
     protocol::ServerInfo,
+    streaming::{Encoding, StreamSettings},
     telemetry::{Counters, Metered},
 };
 
@@ -84,6 +85,58 @@ fn send_udp(
     Ok(())
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum VideoAction {
+    Wait,
+    Recover,
+    Reconnect,
+}
+
+#[derive(Default)]
+struct VideoWatchdog {
+    waiting_since: Option<Instant>,
+    last_packet: Option<Instant>,
+}
+
+impl VideoWatchdog {
+    fn packet(&mut self, now: Instant) {
+        if self
+            .last_packet
+            .is_none_or(|last| now.saturating_duration_since(last) >= Duration::from_secs(1))
+            && self.waiting_since.is_some()
+        {
+            // A quiet desktop must get a fresh recovery window when video resumes.
+            self.waiting_since = Some(now);
+        }
+        self.last_packet = Some(now);
+    }
+
+    fn expect_picture(&mut self, now: Instant) {
+        self.waiting_since.get_or_insert(now);
+    }
+
+    fn decoded(&mut self) {
+        self.waiting_since = None;
+    }
+
+    fn action(&self, now: Instant) -> VideoAction {
+        if self
+            .last_packet
+            .is_none_or(|last| now.saturating_duration_since(last) >= Duration::from_secs(1))
+        {
+            return VideoAction::Wait;
+        }
+        match self
+            .waiting_since
+            .map(|since| now.saturating_duration_since(since))
+        {
+            Some(wait) if wait > Duration::from_secs(30) => VideoAction::Reconnect,
+            Some(wait) if wait > Duration::from_secs(10) => VideoAction::Recover,
+            _ => VideoAction::Wait,
+        }
+    }
+}
+
 pub struct Client {
     pub info: ServerInfo,
     audio: Option<audio::Service>,
@@ -121,9 +174,10 @@ pub struct Client {
     last_nack: Instant,
     last_frame: Instant,
     pacer: crate::render::Pacer<Frame>,
-    last_packet: Instant,
+    watchdog: VideoWatchdog,
     started: Instant,
     fps_ceiling: u16,
+    hevc_bitrate_bps: u32,
     last_recovery: Instant,
     decoded: u64,
     rejected: u64,
@@ -139,15 +193,16 @@ impl Client {
     pub fn open(
         mut stream: Metered<TcpStream>,
         credentials: &Credentials,
-        sixty_fps: bool,
-        maximum_fps: u16,
+        settings: StreamSettings,
         scope: Scope,
         audio_settings: AudioSettings,
         prefer_hardware: bool,
     ) -> Result<Self> {
-        if !(1..=120).contains(&maximum_fps) {
-            return Err(failed("maximum FPS must be 1-120"));
+        settings.validate()?;
+        if !settings.encoding.is_hevc() {
+            return Err(failed("choose an HEVC streaming preset"));
         }
+        let sixty_fps = settings.encoding == Encoding::Hevc60;
         let peer = stream.inner.peer_addr()?;
         let local = stream.inner.local_addr()?;
         let video_port = peer
@@ -192,9 +247,9 @@ impl Client {
                 None
             }
         };
-        let offers = Offers::new(converter.is_some())?;
+        let offers = Offers::new(converter.is_some(), settings.hevc_bitrate_bps)?;
         let configuration = offers.configuration(sixty_fps)?;
-        scope.critical("media.hevc.offer.requested",Level::Info,json!({"media.codec.name":"hevc","media.tiles_per_frame":1,"media.requested_fps":if sixty_fps{60}else{30}}))?;
+        scope.critical("media.hevc.offer.requested",Level::Info,json!({"media.codec.name":"hevc","media.tiles_per_frame":1,"media.requested_fps":if sixty_fps{60}else{30},"media.bitrate.requested_bps":settings.hevc_bitrate_bps}))?;
         let mut early = VecDeque::new();
         let mut early_bytes = 0;
         let mut buffer = [0; 65_536];
@@ -307,12 +362,11 @@ impl Client {
             last_fir: now - Duration::from_secs(1),
             last_nack: now,
             last_frame: now,
-            pacer: crate::render::Pacer::new(
-                maximum_fps.min(if sixty_fps { 60 } else { 30 }).max(1),
-            ),
-            last_packet: now,
+            pacer: crate::render::Pacer::new(settings.max_fps.min(settings.encoding.fps_ceiling())),
+            watchdog: VideoWatchdog::default(),
             started: now,
             fps_ceiling: if sixty_fps { 60 } else { 30 },
+            hevc_bitrate_bps: settings.hevc_bitrate_bps,
             last_recovery: now - Duration::from_secs(1),
             decoded: 0,
             rejected: 0,
@@ -405,9 +459,10 @@ impl Client {
                 settings.validate()?;
                 if !settings.encoding.is_hevc()
                     || settings.encoding.fps_ceiling() != self.fps_ceiling
+                    || settings.hevc_bitrate_bps != self.hevc_bitrate_bps
                 {
                     return Err(failed(
-                        "reconnect before changing the HEVC preset or transport",
+                        "reconnect before changing the HEVC preset, bitrate ceiling or transport",
                     ));
                 }
                 self.pacer.set_fps(settings.max_fps.min(self.fps_ceiling));
@@ -438,6 +493,7 @@ impl Client {
     }
 
     fn recovery(&mut self, reason: &str) -> Result<()> {
+        self.watchdog.expect_picture(Instant::now());
         self.need_keyframe = true;
         self.pacer.clear();
         if self.last_recovery.elapsed() < Duration::from_millis(300) {
@@ -483,7 +539,7 @@ impl Client {
                 return self.alternate_proposal(now);
             }
         }
-        self.last_packet = now;
+        self.watchdog.packet(now);
         if let Some(selected) = self.selected {
             if packet.ssrc == selected {
                 self.highest = self.highest.max(packet.index);
@@ -515,7 +571,7 @@ impl Client {
             "media.codec.requested":"hevc","media.codec.observed":"h264","media.proposal.bank":123,
         }))?;
         self.audio.take();
-        self.offers = Offers::with_bank(true, self.converter.is_some())?;
+        self.offers = Offers::with_bank(true, self.converter.is_some(), self.hevc_bitrate_bps)?;
         self.configuration = self.offers.configuration(self.fps_ceiling == 60)?;
         self.receiver = Srtp::new(&self.offers.video_receive);
         self.feedback = Srtcp::new(&self.offers.video_send);
@@ -528,6 +584,7 @@ impl Client {
         self.candidate_bytes = 0;
         self.selection_at = now + Duration::from_millis(400);
         self.need_keyframe = true;
+        self.watchdog = VideoWatchdog::default();
         self.alternate_bank = true;
         self.video_started = now;
         self.channel.send(&self.configuration)?;
@@ -705,6 +762,7 @@ impl Client {
             self.request_keyframe()?;
         }
         if self.last_feedback.elapsed() >= Duration::from_secs(1) {
+            send_udp(&self.video_socket, self.video_peer, &[0], &self.counters)?;
             self.channel.send(&[3, 1, 0, 0, 0, 0, 0, 1, 0, 1])?;
             let mut report = rtp::sender_report(self.offers.video_ssrc)?;
             report.extend_from_slice(&rtp::report(
@@ -755,6 +813,7 @@ impl Client {
             self.recovery(&loss.reason)?;
         }
         for unit in units {
+            self.watchdog.expect_picture(now);
             if self.need_keyframe && !unit.random_access {
                 continue;
             }
@@ -774,6 +833,7 @@ impl Client {
                         self.backing = size;
                         self.decoded += 1;
                         self.last_frame = now;
+                        self.watchdog.decoded();
                         self.counters
                             .encoding
                             .store(COUNTER_ENCODING, Ordering::Relaxed);
@@ -809,20 +869,22 @@ impl Client {
             self.request_keyframe()?;
         }
         if self.decoded == 0 && self.video_started.elapsed() > Duration::from_secs(20) {
-            return Err(failed(
-                "no decodable HEVC video arrived. Check UDP ports 5900/5901, the Mac's High Performance support, and its active desktop.",
+            return Err(Error::ConnectionLost(
+                "no decodable HEVC video arrived. Check UDP ports 5900/5901, the Mac's High Performance support, and its active desktop.".into(),
             ));
         }
-        if self.decoded != 0
-            && self.last_frame.elapsed() > Duration::from_secs(10)
-            && self.last_packet.elapsed() < Duration::from_secs(1)
-        {
-            if self.last_frame.elapsed() > Duration::from_secs(30) {
-                return Err(failed(
-                    "HEVC video could not recover a complete picture; reconnect the Mac session",
-                ));
+        if self.decoded != 0 {
+            match self.watchdog.action(now) {
+                VideoAction::Wait => (),
+                VideoAction::Recover => {
+                    self.recovery("HEVC video is arriving without a complete picture")?;
+                }
+                VideoAction::Reconnect => {
+                    return Err(Error::ConnectionLost(
+                        "HEVC video could not recover a complete picture".into(),
+                    ));
+                }
             }
-            self.recovery("HEVC video is arriving without a complete picture")?;
         }
         Ok(self.pacer.take(Instant::now()))
     }

@@ -1,9 +1,12 @@
 use serde::Serialize;
 use windows::{
     Win32::{
-        Foundation::HMODULE,
+        Foundation::{HMODULE, LUID},
         Graphics::{
-            Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1},
+            Direct3D::{
+                D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0,
+                D3D_FEATURE_LEVEL_11_1,
+            },
             Direct3D11::{
                 D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_DECODER_PROFILE_HEVC_VLD_MAIN,
                 D3D11_DECODER_PROFILE_HEVC_VLD_MAIN10, D3D11_SDK_VERSION, D3D11CreateDevice,
@@ -14,8 +17,8 @@ use windows::{
                     DXGI_FORMAT, DXGI_FORMAT_AYUV, DXGI_FORMAT_NV12, DXGI_FORMAT_P010,
                     DXGI_FORMAT_Y410,
                 },
-                CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_ERROR_NOT_FOUND,
-                IDXGIFactory1,
+                CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_ERROR_NOT_FOUND, IDXGIAdapter,
+                IDXGIDevice, IDXGIFactory1,
             },
         },
     },
@@ -86,8 +89,31 @@ pub struct Candidate {
     pub backend: Backend,
 }
 
-fn candidate_order(adapters: &[Adapter], requested: Option<&str>) -> Vec<Candidate> {
+fn candidate_order(
+    adapters: &[Adapter],
+    requested: Option<&str>,
+    windows_adapter: Option<u64>,
+) -> Vec<Candidate> {
     let mut candidates = Vec::new();
+    if matches!(requested, None | Some("auto")) {
+        if let Some(adapter) = adapters.iter().find(|adapter| {
+            Some(adapter.luid) == windows_adapter && adapter.hevc_444 && adapter.error.is_none()
+        }) {
+            if adapter.vendor_id == 0x10de {
+                candidates.push(Candidate {
+                    index: adapter.index,
+                    name: adapter.name.clone(),
+                    backend: Backend::Nvdec,
+                });
+            }
+            candidates.push(Candidate {
+                index: adapter.index,
+                name: adapter.name.clone(),
+                backend: Backend::D3d11,
+            });
+        }
+        return candidates;
+    }
     if requested != Some("d3d11") && requested != Some("software") {
         candidates.extend(
             adapters
@@ -123,12 +149,56 @@ fn candidate_order(adapters: &[Adapter], requested: Option<&str>) -> Vec<Candida
     candidates
 }
 
+fn luid(value: LUID) -> u64 {
+    (u64::from(value.HighPart as u32) << 32) | u64::from(value.LowPart)
+}
+
+fn windows_adapter_luid() -> Result<u64> {
+    let failed = |error| Error::Display(format!("Cannot query Windows' default GPU: {error}"));
+    let mut device = None;
+    unsafe {
+        // A null adapter lets Windows/driver policy choose instead of requesting a vendor.
+        D3D11CreateDevice(
+            None::<&IDXGIAdapter>,
+            D3D_DRIVER_TYPE_HARDWARE,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+            Some(&[D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0]),
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            None,
+        )
+        .map_err(failed)?;
+        let device = device.ok_or_else(|| Error::Display("Windows did not select a GPU".into()))?;
+        let dxgi: IDXGIDevice = device.cast().map_err(failed)?;
+        let adapter = dxgi.GetAdapter().map_err(failed)?;
+        Ok(luid(adapter.GetDesc().map_err(failed)?.AdapterLuid))
+    }
+}
+
+fn selected_candidates(adapters: &[Adapter], requested: Option<&str>) -> Result<Vec<Candidate>> {
+    preference(requested)?;
+    let preferred = if matches!(requested, None | Some("auto")) {
+        let preferred = windows_adapter_luid()?;
+        if !adapters.iter().any(|adapter| adapter.luid == preferred) {
+            return Err(Error::Display(
+                "The GPU selected by Windows is no longer available".into(),
+            ));
+        }
+        Some(preferred)
+    } else {
+        None
+    };
+    Ok(candidate_order(adapters, requested, preferred))
+}
+
 pub fn candidates() -> Result<Vec<Candidate>> {
     if !hardware_enabled()? {
         return Ok(Vec::new());
     }
     let requested = std::env::var("MACCANVAS_VIDEO_DECODER").ok();
-    Ok(candidate_order(&adapters()?, requested.as_deref()))
+    selected_candidates(&adapters()?, requested.as_deref())
 }
 
 pub enum Decoder {
@@ -173,7 +243,7 @@ impl Decoder {
 pub fn report() -> Result<serde_json::Value> {
     let adapters = adapters()?;
     let requested = std::env::var("MACCANVAS_VIDEO_DECODER").ok();
-    let hardware = candidate_order(&adapters, requested.as_deref())
+    let hardware = selected_candidates(&adapters, requested.as_deref())?
         .into_iter()
         .map(|candidate| {
             let result = Decoder::new(&candidate, Extent::new(64, 48).expect("fixed probe size"));
@@ -186,6 +256,7 @@ pub fn report() -> Result<serde_json::Value> {
         .collect::<Vec<_>>();
     Ok(serde_json::json!({
         "hardware_enabled":hardware_enabled()?,"software_decoder":"libde265",
+        "selection_policy":if matches!(requested.as_deref(), None | Some("auto")) {"windows"} else {"explicit_decoder_override"},
         "adapters":adapters,"hardware_decoders":hardware,
     }))
 }
@@ -196,6 +267,7 @@ pub struct Adapter {
     pub name: String,
     pub vendor_id: u32,
     pub device_id: u32,
+    pub luid: u64,
     pub hevc_420: bool,
     pub hevc_420_10bit: bool,
     pub hevc_444: bool,
@@ -238,6 +310,7 @@ pub fn adapters() -> Result<Vec<Adapter>> {
             name: String::from_utf16_lossy(&description.Description[..length]),
             vendor_id: description.VendorId,
             device_id: description.DeviceId,
+            luid: luid(description.AdapterLuid),
             hevc_420: false,
             hevc_420_10bit: false,
             hevc_444: false,
@@ -292,6 +365,7 @@ mod tests {
             name: format!("Adapter {index}"),
             vendor_id,
             device_id: index,
+            luid: u64::from(index),
             hevc_420: true,
             hevc_420_10bit: true,
             hevc_444: capable,
@@ -303,44 +377,62 @@ mod tests {
     #[test]
     fn integrated_only_systems_get_a_cross_vendor_decoder_candidate() {
         for vendor in [0x8086, 0x1002] {
-            let candidates = super::candidate_order(&[adapter(0, vendor, true)], None);
+            let candidates = super::candidate_order(&[adapter(0, vendor, true)], None, Some(0));
             assert_eq!(candidates.len(), 1);
             assert_eq!(candidates[0].backend, super::Backend::D3d11);
         }
-        assert!(super::candidate_order(&[adapter(0, 0x8086, false)], None).is_empty());
-        assert!(super::candidate_order(&[adapter(0, 0x1002, true)], Some("software")).is_empty());
+        assert!(super::candidate_order(&[adapter(0, 0x8086, false)], None, Some(0)).is_empty());
+        assert!(
+            super::candidate_order(&[adapter(0, 0x1002, true)], Some("software"), None).is_empty()
+        );
     }
 
     #[test]
-    fn hybrid_selection_preserves_nvdec_and_allows_integrated_only_testing() {
+    fn hybrid_selection_follows_windows_and_preserves_explicit_decoder_overrides() {
         let adapters = [
             adapter(0, 0x8086, true),
             adapter(1, 0x10de, true),
             adapter(2, 0x1002, true),
         ];
-        let candidates = super::candidate_order(&adapters, None);
+        let candidates = super::candidate_order(&adapters, None, Some(0));
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            (candidates[0].index, candidates[0].backend),
+            (0, super::Backend::D3d11)
+        );
+        let candidates = super::candidate_order(&adapters, Some("auto"), Some(1));
+        assert_eq!(candidates.len(), 2);
         assert_eq!(
             (candidates[0].index, candidates[0].backend),
             (1, super::Backend::Nvdec)
         );
         assert_eq!(
             (candidates[1].index, candidates[1].backend),
-            (0, super::Backend::D3d11)
+            (1, super::Backend::D3d11)
         );
-        assert_eq!(
-            (candidates[2].index, candidates[2].backend),
-            (2, super::Backend::D3d11)
-        );
-        let candidates = super::candidate_order(&adapters, Some("d3d11"));
+        let candidates = super::candidate_order(&adapters, None, Some(2));
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].index, 2);
+        let candidates = super::candidate_order(&adapters, Some("d3d11"), None);
         assert_eq!(candidates[0].index, 0);
         assert!(
             candidates
                 .iter()
                 .all(|candidate| candidate.backend == super::Backend::D3d11)
         );
-        let candidates = super::candidate_order(&adapters, Some("nvdec"));
+        let candidates = super::candidate_order(&adapters, Some("nvdec"), None);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].index, 1);
+    }
+
+    #[test]
+    fn automatic_selection_does_not_override_an_unsupported_or_missing_windows_gpu() {
+        let adapters = [adapter(0, 0x8086, false), adapter(1, 0x10de, true)];
+        assert!(super::candidate_order(&adapters, None, Some(0)).is_empty());
+        assert!(super::candidate_order(&adapters, None, Some(99)).is_empty());
+        let mut failed = adapter(0, 0x8086, true);
+        failed.error = Some("driver unavailable".into());
+        assert!(super::candidate_order(&[failed], Some("auto"), Some(0)).is_empty());
     }
 
     #[test]

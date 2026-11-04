@@ -128,6 +128,7 @@ pub struct StreamSettings {
     pub compression: u8,
     pub jpeg_quality: u8,
     pub target_kbps: u32,
+    pub hevc_bitrate_bps: u32,
     pub max_fps: u16,
 }
 
@@ -138,12 +139,18 @@ impl Default for StreamSettings {
             compression: 6,
             jpeg_quality: 8,
             target_kbps: 0,
+            hevc_bitrate_bps: 0,
             max_fps: 60,
         }
     }
 }
 
 impl StreamSettings {
+    pub fn requires_reconnect(self, next: Self) -> bool {
+        self.encoding.requires_reconnect(next.encoding)
+            || (self.encoding.is_hevc() && self.hevc_bitrate_bps != next.hevc_bitrate_bps)
+    }
+
     pub fn validate_authentication(self, authentication: crate::profiles::AuthMode) -> Result<()> {
         self.validate()?;
         if self.encoding.is_hevc() && authentication != crate::profiles::AuthMode::MacLogin {
@@ -157,7 +164,7 @@ impl StreamSettings {
     pub fn validate(self) -> Result<()> {
         if self.encoding.is_hevc() && self.target_kbps != 0 {
             return Err(Error::Configuration(
-                "HEVC uses the Mac's adaptive video bitrate; the VNC request-bandwidth target does not apply".into()
+                "Use the HEVC bitrate ceiling instead of the VNC request-bandwidth target".into(),
             ));
         }
         if self.compression > 9
@@ -238,6 +245,19 @@ impl StreamSettings {
     }
 }
 
+pub fn parse_hevc_bitrate_mbps(value: &str) -> Result<u32> {
+    let mbps = value.trim().parse::<f64>().map_err(|_| {
+        Error::Configuration("Enter an HEVC bitrate in Mbps, for example 25 or 0.5".into())
+    })?;
+    let bps = mbps * 1_000_000.0;
+    if !mbps.is_finite() || !(0.000001..=f64::from(u32::MAX) / 1_000_000.0).contains(&mbps) {
+        return Err(Error::Configuration(
+            "HEVC bitrate must be between 0.000001 and 4294.967295 Mbps".into(),
+        ));
+    }
+    Ok(bps.round() as u32)
+}
+
 pub fn encoding_name(id: i32) -> &'static str {
     match id {
         0 => "Raw",
@@ -268,6 +288,7 @@ mod tests {
         assert_eq!(Encoding::default(), Encoding::Hevc60);
         assert_eq!(settings.max_fps, 60);
         assert_eq!(settings.target_kbps, 0);
+        assert_eq!(settings.hevc_bitrate_bps, 0);
         assert_eq!(settings.compression, 6);
         assert!(settings.encodings().is_err());
         settings.validate().unwrap();
@@ -305,6 +326,74 @@ mod tests {
                 assert_eq!(current.requires_reconnect(next), expected);
             }
         }
+        let current = StreamSettings::default();
+        let manual = StreamSettings {
+            hevc_bitrate_bps: 125_500_000,
+            ..current
+        };
+        assert!(current.requires_reconnect(manual));
+        assert!(manual.requires_reconnect(current));
+        assert!(!manual.requires_reconnect(StreamSettings {
+            max_fps: 20,
+            ..manual
+        }));
+        let vnc = StreamSettings {
+            encoding: Encoding::Auto,
+            ..current
+        };
+        assert!(!vnc.requires_reconnect(StreamSettings {
+            target_kbps: 500,
+            hevc_bitrate_bps: manual.hevc_bitrate_bps,
+            ..vnc
+        }));
+    }
+
+    #[test]
+    fn custom_hevc_bitrates_accept_free_entry_with_only_the_wire_limit() {
+        for (text, expected) in [
+            ("0.000001", 1),
+            ("0.5", 500_000),
+            (" 25.123456 ", 25_123_456),
+            ("125.5", 125_500_000),
+            ("4294.967295", u32::MAX),
+        ] {
+            let bitrate = parse_hevc_bitrate_mbps(text).unwrap();
+            assert_eq!(bitrate, expected);
+            StreamSettings {
+                hevc_bitrate_bps: bitrate,
+                ..Default::default()
+            }
+            .validate()
+            .unwrap();
+        }
+        for text in [
+            "",
+            "abc",
+            "0",
+            "-1",
+            "NaN",
+            "inf",
+            "0.0000009",
+            "4294.967296",
+        ] {
+            assert!(parse_hevc_bitrate_mbps(text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn existing_settings_keep_adaptive_hevc_and_custom_bitrates_round_trip() {
+        let existing: StreamSettings =
+            serde_json::from_str(r#"{"encoding":"hevc30","max_fps":30}"#).unwrap();
+        assert_eq!(existing.hevc_bitrate_bps, 0);
+        let manual = StreamSettings {
+            hevc_bitrate_bps: 125_500_000,
+            ..existing
+        };
+        let json = serde_json::to_string(&manual).unwrap();
+        assert_eq!(
+            serde_json::from_str::<StreamSettings>(&json).unwrap(),
+            manual
+        );
     }
 
     #[test]

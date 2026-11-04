@@ -275,8 +275,8 @@ impl Channel {
         while let Some(bytes) = self.output.front() {
             match self.stream.write(&bytes[self.output_offset..]) {
                 Ok(0) => {
-                    return Err(failed(
-                        "the encrypted control connection closed while writing",
+                    return Err(Error::ConnectionLost(
+                        "the encrypted HEVC control connection closed while writing".into(),
                     ));
                 }
                 Ok(count) => {
@@ -330,7 +330,11 @@ impl Channel {
         let mut buffer = [0; 16_384];
         for _ in 0..16 {
             match self.stream.read(&mut buffer) {
-                Ok(0) => return Err(failed("the Mac closed encrypted control")),
+                Ok(0) => {
+                    return Err(Error::ConnectionLost(
+                        "the Mac closed encrypted HEVC control".into(),
+                    ));
+                }
                 Ok(count) => self.wire.extend_from_slice(&buffer[..count]),
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(error) => return Err(error.into()),
@@ -483,7 +487,8 @@ pub(super) fn wait_canvas(
         }
         thread::sleep(Duration::from_millis(10));
     }
-    Err(failed(
-        "the Mac did not accept HEVC streaming; this requires a compatible Mac with an active desktop",
+    Err(Error::ConnectionLost(
+        "the Mac did not accept HEVC streaming; this requires a compatible Mac with an active desktop"
+            .into(),
     ))
 }

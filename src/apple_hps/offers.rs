@@ -54,11 +54,11 @@ pub(super) struct Offers {
 }
 
 impl Offers {
-    pub fn new(audio: bool) -> Result<Self> {
-        Self::with_bank(false, audio)
+    pub fn new(audio: bool, video_bitrate_bps: u32) -> Result<Self> {
+        Self::with_bank(false, audio, video_bitrate_bps)
     }
 
-    pub fn with_bank(alternate: bool, audio: bool) -> Result<Self> {
+    pub fn with_bank(alternate: bool, audio: bool, video_bitrate_bps: u32) -> Result<Self> {
         let audio_ssrc = random_u32()?;
         let video_ssrc = random_u32()?;
         let key = || -> Result<Zeroizing<[u8; 46]>> {
@@ -68,8 +68,8 @@ impl Offers {
             Ok(value)
         };
         Ok(Self {
-            audio: offer(false, audio_ssrc, alternate, audio)?,
-            video: offer(true, video_ssrc, alternate, audio)?,
+            audio: offer(false, audio_ssrc, alternate, audio, 0)?,
+            video: offer(true, video_ssrc, alternate, audio, video_bitrate_bps)?,
             audio_ssrc,
             video_ssrc,
             audio_send: key()?,
@@ -105,7 +105,13 @@ impl Offers {
     }
 }
 
-fn offer(video: bool, session: u32, alternate: bool, audio: bool) -> Result<Vec<u8>> {
+fn offer(
+    video: bool,
+    session: u32,
+    alternate: bool,
+    audio: bool,
+    video_bitrate_bps: u32,
+) -> Result<Vec<u8>> {
     let mut description = Vec::new();
     number(&mut description, 1, u64::from(session));
     if video {
@@ -170,6 +176,12 @@ fn offer(video: bool, session: u32, alternate: bool, audio: bool) -> Result<Vec<
     ] {
         let mut tier = Vec::new();
         number(&mut tier, 1, kind);
+        // Kind-zero entries cap bandwidth for the different network profiles.
+        let rate = if video && kind == 0 && video_bitrate_bps != 0 {
+            u64::from(video_bitrate_bps)
+        } else {
+            rate
+        };
         number(&mut tier, 2, rate);
         if let Some(cap) = cap {
             number(&mut tier, 3, cap);
@@ -336,7 +348,7 @@ mod tests {
 
     #[test]
     fn offers_request_real_hevc_single_picture_and_suppress_audio() {
-        let offers = Offers::new(false).unwrap();
+        let offers = Offers::new(false, 0).unwrap();
         assert_ne!(&*offers.video_send, &*offers.video_receive);
         let video = Value::from_reader(Cursor::new(&offers.video)).unwrap();
         let dict = video.as_dictionary().unwrap();
@@ -369,6 +381,63 @@ mod tests {
         assert_eq!(&fast[6..10], &5_u32.to_be_bytes());
         assert_eq!(&slow[6..10], &4_u32.to_be_bytes());
         assert_eq!(fast.len(), offers.audio.len() + offers.video.len() + 0xdc);
+    }
+
+    fn bandwidth_caps(offer: &[u8]) -> Vec<u64> {
+        let value = Value::from_reader(Cursor::new(offer)).unwrap();
+        let mut blob = Vec::new();
+        ZlibDecoder::new(value.as_dictionary().unwrap()[BLOB].as_data().unwrap())
+            .read_to_end(&mut blob)
+            .unwrap();
+        fields(&blob)
+            .unwrap()
+            .into_iter()
+            .filter_map(|field| {
+                let Field::Bytes(9, tier) = field else {
+                    return None;
+                };
+                let tier = fields(tier).unwrap();
+                if !tier
+                    .iter()
+                    .any(|field| matches!(field, Field::Number(1, 0)))
+                {
+                    return None;
+                }
+                tier.into_iter().find_map(|field| match field {
+                    Field::Number(2, value) => Some(value),
+                    _ => None,
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn custom_video_bitrate_replaces_network_caps_in_both_banks_without_changing_audio() {
+        let adaptive = Offers::new(true, 0).unwrap();
+        let default_caps = vec![
+            40_000_000,
+            6_000_000,
+            75_000_000,
+            20_000_000,
+            60_000_000,
+            100_000_000,
+        ];
+        assert_eq!(bandwidth_caps(&adaptive.video), default_caps);
+        for alternate in [false, true] {
+            for bitrate in [1, 500_000, 125_500_000, u32::MAX] {
+                let manual = Offers::with_bank(alternate, true, bitrate).unwrap();
+                assert_eq!(
+                    bandwidth_caps(&manual.video),
+                    vec![u64::from(bitrate); default_caps.len()]
+                );
+                assert_eq!(bandwidth_caps(&manual.audio), default_caps);
+                for sixty_fps in [false, true] {
+                    let wire = manual.configuration(sixty_fps).unwrap();
+                    let video = &wire[0x80 + manual.audio.len() + 92..];
+                    assert_eq!(bandwidth_caps(video), bandwidth_caps(&manual.video));
+                }
+            }
+        }
     }
 
     #[test]
