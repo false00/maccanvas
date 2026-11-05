@@ -76,9 +76,18 @@ try {
     Write-Output 'Profiles, preferences, and managed installer receipt preserved: PASS'
 } finally {
     foreach ($owned in @($process, $restarted)) {
-        if ($null -ne $owned -and -not $owned.HasExited) {
-            $null = $owned.CloseMainWindow()
-            if (-not $owned.WaitForExit(5000)) { Stop-Process -Id $owned.Id -Force }
+        if ($null -ne $owned) {
+            try {
+                if (-not $owned.HasExited) {
+                    $null = $owned.CloseMainWindow()
+                    if (-not $owned.WaitForExit(5000)) {
+                        Stop-Process -Id $owned.Id -Force
+                        if (-not $owned.WaitForExit(10000)) {
+                            throw 'The owned update-test process did not finish terminating.'
+                        }
+                    }
+                }
+            } finally { $owned.Dispose() }
         }
     }
     foreach ($file in @($exe, $receiptPath, (Join-Path $data 'settings.json'))) {
