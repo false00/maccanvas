@@ -22,7 +22,7 @@ mod tests {
         assert!(output.status.success());
         assert_eq!(
             String::from_utf8(output.stdout).unwrap().trim(),
-            "aac-to-wav 0.1.0"
+            format!("aac-to-wav {}", env!("CARGO_PKG_VERSION"))
         );
         assert_eq!(SHA256.len(), 64);
         assert!(size() > 0 && size() <= 8 * 1024 * 1024);

@@ -145,6 +145,12 @@ release. Audio works with compatible **HEVC / H.265** sessions; ordinary VNC
 does not carry sound. Enabling or retrying sound reconnects an active HEVC
 session automatically, with fresh Hello approval for saved logins.
 
+Viewer-only releases reuse the same verified audio converter, so an installed
+component remains available after updating MacCanvas. A new audio download is
+needed only when the converter component itself changes or is not installed.
+Cached converters remain SHA-256 verified; old copies are not accepted as a
+substitute for a genuinely changed component.
+
 Playback follows your Windows output device. Volume and mute are local to
 MacCanvas; they do not change the Mac's volume. No microphone audio is captured
 or sent. Audio content is never written to logs or media files.
@@ -227,6 +233,16 @@ decoding for supported 8-bit HEVC 4:4:4 streams, a bundled libde265 software
 fallback, and static Microsoft C runtime. D3D11 decoding uses the installed
 Windows HEVC decoder component; NVIDIA NVDEC does not need it or a CUDA toolkit.
 Windows releases are built and tested in GitHub Actions.
+
+To reuse the official audio converter in a source build, run this before the
+Cargo commands above (requires GitHub CLI). Changed converter inputs select a
+fresh source build instead:
+
+```powershell
+$audio = .\scripts\Prepare-AudioComponent.ps1
+$env:MACCANVAS_AUDIO_COMPONENT = $audio.Path
+$env:MACCANVAS_AUDIO_COMPONENT_SHA256 = $audio.Sha256
+```
 
 Inspect adapter and decoder capabilities without connecting:
 

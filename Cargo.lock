@@ -3201,7 +3201,7 @@ dependencies = [
 
 [[package]]
 name = "maccanvas"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "aes 0.8.4",
  "audio-codec-tool",

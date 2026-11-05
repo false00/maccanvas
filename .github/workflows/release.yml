@@ -44,6 +44,17 @@ jobs:
         run: |
           rustup show
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Preserve the unchanged verified audio component
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          .\scripts\Test-AudioComponent.ps1
+          $component = .\scripts\Prepare-AudioComponent.ps1
+          if ($component.Reused) {
+            "MACCANVAS_AUDIO_COMPONENT=$($component.Path)" | Out-File -LiteralPath $env:GITHUB_ENV -Encoding utf8 -Append
+            "MACCANVAS_AUDIO_COMPONENT_SHA256=$($component.Sha256)" | Out-File -LiteralPath $env:GITHUB_ENV -Encoding utf8 -Append
+          }
       - name: Test and build the viewer and optional audio converter
         shell: pwsh
         run: |

@@ -28,6 +28,27 @@ The executable is `build\Release\aac-to-wav.exe`. Rename it to
 The viewer's Cargo build also builds this program and exports only
 size/hash/location metadata, never codec symbols or embedded executable bytes.
 
+## Release reuse
+
+Viewer-only releases reuse the exact verified converter from the previous stable
+release instead of rebuilding identical native sources with new timestamps.
+[The preparation script](../../scripts/Prepare-AudioComponent.ps1) compares the component package version,
+native sources, vendored sources and license inputs against that release tag.
+Changed native inputs require an `audio-codec-tool` package-version bump and a
+fresh source build. Bump that version (and the converter's `--version`) for
+native build-policy changes too; Rust-only metadata plumbing is not converter code.
+
+CI stages the reused asset through `MACCANVAS_AUDIO_COMPONENT` and
+`MACCANVAS_AUDIO_COMPONENT_SHA256`. Cargo independently verifies its checksum and
+x64 executable format before exporting the normal metadata. Without these
+paired variables, development builds still compile the vendored source.
+Runtime SHA-256 verification and the separately licensed distribution are unchanged.
+
+After publishing a viewer-only update, the
+[live update fixture](../../scripts/Test-LiveUpdate.ps1) accepts `-AudioComponent`
+to verify that an installed converter's bytes, size and trusted pin survive the
+real executable replacement and restart.
+
 ## Licenses
 
 Glue and build metadata: [0BSD](LICENSE).

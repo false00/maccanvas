@@ -612,6 +612,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn audio_cache_identity_does_not_include_the_viewer_version() {
+        let expected = crate::profiles::default_directory()
+            .unwrap()
+            .join("components")
+            .join("audio")
+            .join(audio_codec_tool::SHA256)
+            .join(audio_codec_tool::ASSET);
+        assert_eq!(cache_path().unwrap(), expected);
+    }
+
+    #[test]
     fn component_verification_rejects_modified_and_nonregular_files() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join(audio_codec_tool::ASSET);

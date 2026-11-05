@@ -2,12 +2,36 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$PreviousExecutable,
-    [Parameter(Mandatory = $true)][string]$ExpectedTag
+    [Parameter(Mandatory = $true)][string]$ExpectedTag,
+    [string]$AudioComponent = ''
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 if ($ExpectedTag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw 'ExpectedTag must be a stable version tag.' }
+function Read-UpdateFixtureCli([string]$Executable, [string]$Argument) {
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $Executable
+    $start.Arguments = $Argument
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $child = [Diagnostics.Process]::Start($start)
+    try {
+        $stdout = $child.StandardOutput.ReadToEndAsync()
+        $stderr = $child.StandardError.ReadToEndAsync()
+        if (-not $child.WaitForExit(15000)) {
+            Stop-Process -Id $child.Id -Force
+            if (-not $child.WaitForExit(10000)) { throw 'The update metadata fixture did not terminate.' }
+            throw 'The update metadata fixture timed out.'
+        }
+        $text = $stdout.GetAwaiter().GetResult()
+        $errorText = $stderr.GetAwaiter().GetResult()
+        if ($child.ExitCode -ne 0) { throw "The update metadata fixture failed: $errorText" }
+        return $text.Trim()
+    } finally { $child.Dispose() }
+}
 $temporary = Join-Path ([IO.Path]::GetTempPath()) ('maccanvas-live-update-' + [guid]::NewGuid().ToString('N'))
 $data = Join-Path $temporary 'data'
 $null = [IO.Directory]::CreateDirectory($data)
@@ -32,9 +56,22 @@ $start.FileName = $exe
 $start.Arguments = "--data-dir `"$data`""
 $start.UseShellExecute = $false
 $start.CreateNoWindow = $true
-$process = [Diagnostics.Process]::Start($start)
+$process = $null
 $restarted = $null
+$audioPath = $null
 try {
+    if ($AudioComponent) {
+        $audioBefore = Read-UpdateFixtureCli $exe '--audio-component-info' | ConvertFrom-Json
+        $audioFile = Get-Item -LiteralPath (Resolve-Path -LiteralPath $AudioComponent).Path
+        if ($audioBefore.asset -cne 'MacCanvas-audio-windows-x64.exe' -or
+            $audioBefore.size -ne $audioFile.Length -or
+            $audioBefore.sha256 -cne (Get-FileHash -LiteralPath $audioFile.FullName -Algorithm SHA256).Hash.ToLowerInvariant()) {
+            throw 'The supplied audio component does not match the previous viewer.'
+        }
+        $audioPath = Join-Path $temporary $audioBefore.asset
+        Copy-Item -LiteralPath $audioFile.FullName -Destination $audioPath
+    }
+    $process = [Diagnostics.Process]::Start($start)
     $deadline = [DateTime]::UtcNow.AddSeconds(20)
     while ($process.MainWindowTitle -cne 'MacCanvas' -and [DateTime]::UtcNow -lt $deadline) {
         Start-Sleep -Milliseconds 100
@@ -72,6 +109,17 @@ try {
         if ($null -eq $restarted) { Start-Sleep -Milliseconds 100 }
     } while ($null -eq $restarted -and [DateTime]::UtcNow -lt $deadline)
     if ($null -eq $restarted) { throw 'The new viewer did not restart.' }
+    if ($AudioComponent) {
+        $audioAfter = Read-UpdateFixtureCli $exe '--audio-component-info' | ConvertFrom-Json
+        if ($audioAfter.version -cne $ExpectedTag.Substring(1) -or
+            $audioAfter.asset -cne $audioBefore.asset -or
+            $audioAfter.size -ne $audioBefore.size -or
+            $audioAfter.sha256 -cne $audioBefore.sha256 -or
+            (Get-FileHash -LiteralPath $audioPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $audioAfter.sha256) {
+            throw 'The viewer-only update did not preserve the installed audio component and its trusted pin.'
+        }
+        Write-Output 'Installed audio converter bytes, size and trusted SHA-256 preserved across update: PASS'
+    }
     Write-Output 'Real startup check -> update prompt -> verified download -> replacement -> restart: PASS'
     Write-Output 'Profiles, preferences, and managed installer receipt preserved: PASS'
 } finally {
@@ -90,8 +138,8 @@ try {
             } finally { $owned.Dispose() }
         }
     }
-    foreach ($file in @($exe, $receiptPath, (Join-Path $data 'settings.json'))) {
-        if (Test-Path -LiteralPath $file -PathType Leaf) { [IO.File]::Delete($file) }
+    foreach ($file in @($exe, $receiptPath, (Join-Path $data 'settings.json'), $audioPath)) {
+        if ($null -ne $file -and (Test-Path -LiteralPath $file -PathType Leaf)) { [IO.File]::Delete($file) }
     }
     foreach ($directory in @($data, $temporary)) {
         if ((Test-Path -LiteralPath $directory -PathType Container) -and @(Get-ChildItem -LiteralPath $directory -Force).Count -eq 0) {
