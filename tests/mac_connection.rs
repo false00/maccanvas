@@ -14,11 +14,15 @@ use crypto_bigint::{
 use md5::{Digest, Md5};
 
 use maccanvas::{
+    audit::Audit,
     auth::Credentials,
+    credentials::CredentialSource,
     geometry::{Extent, Viewport},
     input::Command,
-    profiles::AuthMode,
+    profiles::{AuthMode, Profile},
     protocol::{Decoder, Message, PIXEL_FORMAT, handshake},
+    session::{Event, Request, Session},
+    streaming::{Encoding, StreamSettings},
 };
 
 const PRIME: &str = concat!(
@@ -170,6 +174,88 @@ fn mac_login_four_k_frame_and_dpi_scaled_input_round_trip() {
     assert_eq!(packets[1], [5, 1, 0x0e, 0xff, 0x08, 0x6f]);
     assert_eq!(packets[2], [5, 0, 0x0e, 0xff, 0x08, 0x6f]);
     server.join().unwrap();
+}
+
+#[test]
+fn cold_mac_login_retries_a_closed_socket_before_connecting() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut audit = Audit::start(directory.path().join("audit")).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (shutdown, shutdown_requested) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        drop(stream);
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        server_authenticate(&mut stream);
+        stream.write_all(&4u16.to_be_bytes()).unwrap();
+        stream.write_all(&4u16.to_be_bytes()).unwrap();
+        stream.write_all(&PIXEL_FORMAT).unwrap();
+        stream.write_all(&7u32.to_be_bytes()).unwrap();
+        stream.write_all(b"Fixture").unwrap();
+        shutdown_requested
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap();
+    });
+    let (events, receiver) = mpsc::channel();
+    let session = Session::start(
+        Request {
+            profile: Profile {
+                id: uuid::Uuid::new_v4(),
+                name: "Cold VNC fixture".into(),
+                host: address.ip().to_string(),
+                port: address.port(),
+                authentication: AuthMode::MacLogin,
+                has_saved_credentials: false,
+            },
+            credentials: CredentialSource::Manual(Credentials::new(
+                "fixture-user".into(),
+                "fixture-password".into(),
+            )),
+            streaming: StreamSettings {
+                encoding: Encoding::Auto,
+                ..Default::default()
+            },
+            audio: Default::default(),
+            remember: false,
+            window: 0,
+            generation: 1,
+            audit: audit.audit().scope(serde_json::json!({})),
+            clipboard: false,
+        },
+        events,
+        Default::default(),
+    )
+    .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut retries = 0;
+    loop {
+        match receiver
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .unwrap()
+            .1
+        {
+            Event::Retrying { attempt, delay } if !delay.is_zero() => {
+                assert_eq!(attempt, 2);
+                assert_eq!(delay, Duration::from_secs(1));
+                retries += 1;
+            }
+            Event::Connected { server_name, .. } => {
+                assert_eq!(server_name, "Fixture");
+                break;
+            }
+            Event::Error(error) => panic!("Cold VNC startup failed: {error}"),
+            _ => (),
+        }
+    }
+    assert_eq!(retries, 1);
+    shutdown.send(()).unwrap();
+    session.finish().unwrap();
+    server.join().unwrap();
+    audit.shutdown().unwrap();
 }
 
 #[test]

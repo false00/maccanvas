@@ -61,6 +61,12 @@ or bypass Windows application-control policies.
 4. To reconnect with Hello, enable **Save login in Credential Manager**.
    Credentials are saved only after a successful login.
 
+A cold connection retries transient network/startup failures up to three times,
+after 1, 2, and 4 seconds. Startup retries reuse the credentials from the same
+Windows Hello approval, without prompting again. **Cancel** stops retries.
+Authentication failures, denied Hello consent, and security-audit failures are
+not retried; an exhausted connection still shows its final error.
+
 **VNC password** is for the separate password configured in Screen Sharing,
 not the Mac account password; select a lossless VNC mode in **Quality** to use it.
 If necessary, use your macOS short username.
@@ -128,9 +134,10 @@ after a long pause. Periodic video-port keepalives preserve the UDP/NAT path eve
 when no new pictures are sent. After an established HEVC session suffers a network/control
 interruption or an unrecoverable picture stall, MacCanvas retries continuously,
 waiting 1, 2, 4, 8, 16, then at most 30 seconds between attempts. **Cancel** or
-**Disconnect** stops retries. Saved-login attempts still require Windows Hello;
-declining consent, authentication failures, and security-audit failures stop
-retries rather than repeatedly prompting or bypassing the security gate.
+**Disconnect** stops retries. Each new saved-login reconnect requires Windows Hello;
+its startup retries reuse that approval. Declining consent, authentication failures,
+and security-audit failures stop retries rather than repeatedly prompting or
+bypassing the security gate.
 
 A bandwidth target paces screen requests; **it is not a guaranteed bitrate cap**.
 Bursts can exceed it. Keyboard and mouse input are not throttled.

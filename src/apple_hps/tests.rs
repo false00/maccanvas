@@ -144,15 +144,20 @@ fn media_answer() -> Vec<u8> {
 
 #[test]
 fn encrypted_apple_peer_decodes_real_hevc_and_preserves_input_and_hello_gates() {
-    encrypted_apple_peer(false);
+    encrypted_apple_peer(false, 0);
 }
 
 #[test]
 fn unexpected_hevc_control_disconnect_requests_automatic_reconnect() {
-    encrypted_apple_peer(true);
+    encrypted_apple_peer(true, 0);
 }
 
-fn encrypted_apple_peer(drop_connection: bool) {
+#[test]
+fn cold_hevc_connection_retries_before_showing_an_error() {
+    encrypted_apple_peer(false, 2);
+}
+
+fn encrypted_apple_peer(drop_connection: bool, startup_failures: usize) {
     let _peer_test = PEER_TEST.lock().unwrap();
     let directory = tempfile::tempdir().unwrap();
     let mut audit = Audit::start(directory.path().join("audit")).unwrap();
@@ -166,6 +171,10 @@ fn encrypted_apple_peer(drop_connection: bool) {
     let private = RsaPrivateKey::new(&mut rand::rngs::OsRng, 2048).unwrap();
     let public = private.to_public_key().to_public_key_der().unwrap();
     let server = thread::spawn(move || {
+        for _ in 0..startup_failures {
+            let (socket, _) = listener.accept().unwrap();
+            drop(socket);
+        }
         let (mut socket, peer) = listener.accept().unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(15)))
@@ -370,12 +379,16 @@ fn encrypted_apple_peer(drop_connection: bool) {
     .unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut cursor_seen = false;
+    let mut retries = Vec::new();
     loop {
         match receiver
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
             .unwrap()
             .1
         {
+            Event::Retrying { attempt, delay } if !delay.is_zero() => {
+                retries.push((attempt, delay));
+            }
             Event::Cursor {
                 update: super::cursor::Update::Image(cursor),
                 point_scale,
@@ -400,6 +413,12 @@ fn encrypted_apple_peer(drop_connection: bool) {
     assert!(
         cursor_seen,
         "The initial cursor must survive negotiation and reach the UI event queue"
+    );
+    assert_eq!(
+        retries,
+        (0..startup_failures)
+            .map(|retry| (retry + 2, Duration::from_secs(1 << retry)))
+            .collect::<Vec<_>>(),
     );
     let frame = loop {
         if let Some(frame) = frames.lock().unwrap().clone() {
@@ -506,6 +525,12 @@ fn encrypted_apple_peer(drop_connection: bool) {
     server.join().unwrap();
     audit.shutdown().unwrap();
     let log = std::fs::read_to_string(audit.audit().path()).unwrap();
+    let retry_records = log
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|record| record["event_name"] == "session.connection.retry.scheduled")
+        .count();
+    assert_eq!(retry_records, startup_failures);
     assert!(log.contains("media.hevc.first_frame"));
     assert!(log.contains("media.audio.first_frame"));
     assert!(log.contains("media.audio.codec.process.closed"));

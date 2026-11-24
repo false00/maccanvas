@@ -74,18 +74,12 @@ impl ScrollAccumulator {
             + f64::from(x) / SCROLL_PIXELS_PER_NOTCH * scale.units(scale.horizontal);
         let vertical =
             self.vertical + f64::from(y) / SCROLL_PIXELS_PER_NOTCH * scale.units(scale.vertical);
-        if !horizontal.is_finite()
-            || !vertical.is_finite()
-            || horizontal.abs() > MAX_PENDING_SCROLL
-            || vertical.abs() > MAX_PENDING_SCROLL
-        {
+        if !horizontal.is_finite() || !vertical.is_finite() {
             self.clear();
-            return Err(Error::Configuration(
-                "Scroll input exceeded its safe buffer; slow the gesture and try again".into(),
-            ));
+            return Err(Error::Configuration("Scroll input must be finite".into()));
         }
-        self.horizontal = horizontal;
-        self.vertical = vertical;
+        self.horizontal = horizontal.clamp(-MAX_PENDING_SCROLL, MAX_PENDING_SCROLL);
+        self.vertical = vertical.clamp(-MAX_PENDING_SCROLL, MAX_PENDING_SCROLL);
         Ok(())
     }
 
@@ -344,6 +338,36 @@ mod tests {
     }
 
     #[test]
+    fn fast_scroll_bursts_are_capped_without_errors_or_unbounded_batches() {
+        for (delta, gestures) in [(60.0, 200), (f32::MAX, 1)] {
+            let mut scroll = ScrollAccumulator::default();
+            for _ in 0..gestures {
+                scroll
+                    .add(delta, -delta, NORMAL_SCROLL.for_macos())
+                    .unwrap();
+            }
+            let mut total = (0, 0);
+            loop {
+                let steps = scroll.drain();
+                if steps.is_empty() {
+                    break;
+                }
+                assert!(steps.horizontal > 0 && steps.vertical < 0);
+                assert!(
+                    u16::from(steps.horizontal.unsigned_abs())
+                        + u16::from(steps.vertical.unsigned_abs())
+                        <= SCROLL_BATCH
+                );
+                total.0 += i32::from(steps.horizontal);
+                total.1 += i32::from(steps.vertical);
+            }
+            assert_eq!(total, (4096, -4096));
+            scroll.add(-60.0, 60.0, NORMAL_SCROLL).unwrap();
+            assert_eq!(scroll.drain(), ScrollSteps::new(-3, 3).unwrap());
+        }
+    }
+
+    #[test]
     fn disabled_and_page_preferences_are_handled_explicitly() {
         let mut scroll = ScrollAccumulator::default();
         scroll
@@ -368,7 +392,7 @@ mod tests {
         scroll.add(60.0, 60.0, NORMAL_SCROLL).unwrap();
         scroll.clear();
         assert!(scroll.drain().is_empty());
-        for delta in [f32::NAN, f32::INFINITY, f32::MAX] {
+        for delta in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
             assert!(scroll.add(delta, delta, NORMAL_SCROLL).is_err());
             assert!(scroll.drain().is_empty());
         }

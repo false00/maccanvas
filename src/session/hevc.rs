@@ -19,7 +19,7 @@ use crate::{
     telemetry::{Counters, Metered},
 };
 
-use super::{Control, Event, Frames, Request, WriterCommand};
+use super::{Control, Event, Frames, Request, WriterCommand, connect_with_retry};
 
 pub(super) fn run(
     request: Request,
@@ -29,57 +29,77 @@ pub(super) fn run(
     control: &Arc<Control>,
     counters: Arc<Counters>,
 ) -> Result<()> {
-    let credentials = credentials::resolve(
-        request.profile.id,
-        request.credentials,
-        &AuditedConsent {
-            scope: &request.audit,
-            window: request.window,
+    let Some(((mut client, first_frame), credentials)) = connect_with_retry(
+        &request.audit,
+        events,
+        request.generation,
+        control,
+        || {
+            credentials::resolve(
+                request.profile.id,
+                request.credentials,
+                &AuditedConsent {
+                    scope: &request.audit,
+                    window: request.window,
+                },
+                &AuditedVault {
+                    scope: &request.audit,
+                },
+            )
         },
-        &AuditedVault {
-            scope: &request.audit,
+        |credentials| {
+            let stream = protocol::connect(&request.profile)?;
+            request.audit.critical(
+                "network.connection.established",
+                Level::Info,
+                json!({
+                    "server.socket.address":stream.peer_addr()?.ip().to_string(),
+                    "server.socket.port":stream.peer_addr()?.port(),
+                    "client.socket.address":stream.local_addr()?.ip().to_string(),
+                    "client.socket.port":stream.local_addr()?.port(),
+                    "network.protocol.name":"apple_screen_sharing","media.codec.requested":"hevc",
+                }),
+            )?;
+            *control
+                .socket
+                .lock()
+                .map_err(|_| Error::Protocol("Connection control is unavailable".into()))? =
+                Some(stream.try_clone()?);
+            if control.cancelled.load(Ordering::Acquire) {
+                return Err(Error::Cancelled);
+            }
+            request.audit.critical(
+                "security.authentication.started",
+                Level::Info,
+                json!({"network.protocol.name":"apple_screen_sharing","rfb.security.type":33}),
+            )?;
+            let stream = Metered {
+                inner: stream,
+                counters: counters.clone(),
+            };
+            let mut client = apple_hps::Client::open(
+                stream,
+                credentials,
+                request.streaming,
+                request.audit.clone(),
+                request.audio,
+                request.window != 0,
+            )?;
+            loop {
+                if control.cancelled.load(Ordering::Acquire) {
+                    return Err(Error::Cancelled);
+                }
+                if let Some(frame) = client.poll()? {
+                    return Ok((client, frame));
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
         },
-    )?;
-    if control.cancelled.load(Ordering::Acquire) {
+    )?
+    else {
         return Ok(());
-    }
-    let stream = protocol::connect(&request.profile)?;
-    request.audit.critical(
-        "network.connection.established",
-        Level::Info,
-        json!({
-            "server.socket.address":stream.peer_addr()?.ip().to_string(),
-            "server.socket.port":stream.peer_addr()?.port(),
-            "client.socket.address":stream.local_addr()?.ip().to_string(),
-            "client.socket.port":stream.local_addr()?.port(),
-            "network.protocol.name":"apple_screen_sharing","media.codec.requested":"hevc",
-        }),
-    )?;
-    *control
-        .socket
-        .lock()
-        .map_err(|_| Error::Protocol("Connection control is unavailable".into()))? =
-        Some(stream.try_clone()?);
-    if control.cancelled.load(Ordering::Acquire) {
-        return Ok(());
-    }
-    request.audit.critical(
-        "security.authentication.started",
-        Level::Info,
-        json!({"network.protocol.name":"apple_screen_sharing","rfb.security.type":33}),
-    )?;
-    let stream = Metered {
-        inner: stream,
-        counters,
     };
-    let mut client = apple_hps::Client::open(
-        stream,
-        &credentials,
-        request.streaming,
-        request.audit.clone(),
-        request.audio,
-        request.window != 0,
-    )?;
+    let mut first_frame = Some(first_frame);
     let mut profile = Some(request.profile);
     let mut credentials = Some(credentials);
     while !control.cancelled.load(Ordering::Acquire) {
@@ -106,10 +126,13 @@ pub(super) fn run(
                 Err(TryRecvError::Disconnected) => return Ok(()),
             }
         }
-        let frame = match client.poll() {
-            Ok(frame) => frame,
-            Err(_) if control.cancelled.load(Ordering::Acquire) => return Ok(()),
-            Err(error) => return Err(error),
+        let frame = match first_frame.take() {
+            Some(frame) => Some(frame),
+            None => match client.poll() {
+                Ok(frame) => frame,
+                Err(_) if control.cancelled.load(Ordering::Acquire) => return Ok(()),
+                Err(error) => return Err(error),
+            },
         };
         if let Some((update, point_scale)) = client.cursor_status() {
             events

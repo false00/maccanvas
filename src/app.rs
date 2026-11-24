@@ -2049,6 +2049,17 @@ pub fn run(
                     continue;
                 }
                 match event {
+                    Event::Retrying { attempt, delay } => {
+                        let message = if delay.is_zero() {
+                            format!("Retrying connection (attempt {attempt})... Cancel to stop.")
+                        } else {
+                            format!(
+                                "Connection not ready. Retrying in {}s (attempt {attempt}); Cancel to stop.",
+                                delay.as_secs(),
+                            )
+                        };
+                        app.set_status(message.into());
+                    }
                     Event::Connected {
                         profile,
                         server_name,

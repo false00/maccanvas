@@ -11,6 +11,7 @@ use std::{
 
 use crate::{
     audit::{self, Level, Scope},
+    auth::Credentials,
     credentials::{self, AuditedConsent, AuditedVault, CredentialSource, CredentialStore},
     error::{Error, Result},
     framebuffer::Framebuffer,
@@ -25,9 +26,19 @@ use zeroize::Zeroizing;
 
 mod hevc;
 
+const STARTUP_RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+];
+
 pub type Frames = Arc<Mutex<Option<Arc<Framebuffer>>>>;
 
 pub enum Event {
+    Retrying {
+        attempt: usize,
+        delay: Duration,
+    },
     Connected {
         profile: Profile,
         server_name: String,
@@ -84,6 +95,10 @@ impl Control {
 
     fn close(&self) -> Result<()> {
         self.cancelled.store(true, Ordering::Release);
+        self.shutdown_socket()
+    }
+
+    fn shutdown_socket(&self) -> Result<()> {
         let socket = self
             .socket
             .lock()
@@ -183,8 +198,12 @@ impl Session {
                 );
                 let reconnect = encoding.is_hevc()
                     && !worker_control.cancelled.load(Ordering::Acquire)
-                    && matches!(&outcome, Err(Error::Io(_) | Error::ConnectionLost(_)));
+                    && outcome
+                        .as_ref()
+                        .err()
+                        .is_some_and(retryable_connection_error);
                 if let Err(error) = &outcome
+                    && !worker_control.cancelled.load(Ordering::Acquire)
                     && events
                         .send((generation, Event::Error(error.to_string())))
                         .is_err()
@@ -357,6 +376,94 @@ impl Drop for Session {
     }
 }
 
+fn retryable_connection_error(error: &Error) -> bool {
+    matches!(error, Error::Io(_) | Error::ConnectionLost(_))
+}
+
+fn connect_with_retry<T>(
+    scope: &Scope,
+    events: &Sender<(u64, Event)>,
+    generation: u64,
+    control: &Control,
+    resolve: impl FnOnce() -> Result<Credentials>,
+    mut connect: impl FnMut(&Credentials) -> Result<T>,
+) -> Result<Option<(T, Credentials)>> {
+    if control.cancelled.load(Ordering::Acquire) {
+        return Ok(None);
+    }
+    let credentials = resolve()?;
+    let mut attempt = 1;
+    loop {
+        if control.cancelled.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        scope.critical(
+            "session.connection.attempt.started",
+            Level::Info,
+            json!({"session.connection.attempt":attempt}),
+        )?;
+        if attempt > 1 {
+            events
+                .send((
+                    generation,
+                    Event::Retrying {
+                        attempt,
+                        delay: Duration::ZERO,
+                    },
+                ))
+                .map_err(|_| Error::Protocol("Connection window closed".into()))?;
+        }
+        let result = connect(&credentials);
+        if control.cancelled.load(Ordering::Acquire) {
+            control.shutdown_socket()?;
+            return Ok(None);
+        }
+        let error = match result {
+            Ok(connection) => return Ok(Some((connection, credentials))),
+            Err(error) => error,
+        };
+        if !retryable_connection_error(&error) {
+            return Err(error);
+        }
+        let Some(&delay) = STARTUP_RETRY_DELAYS.get(attempt - 1) else {
+            return Err(error);
+        };
+        control.shutdown_socket()?;
+        control
+            .socket
+            .lock()
+            .map_err(|_| Error::Protocol("Connection control is unavailable".into()))?
+            .take();
+        let mut attributes = audit::error_attributes(&error);
+        attributes["session.connection.attempt"] = json!(attempt + 1);
+        attributes["session.connection.max_attempts"] = json!(STARTUP_RETRY_DELAYS.len() + 1);
+        attributes["session.connection.delay_ms"] = json!(delay.as_millis() as u64);
+        scope.critical(
+            "session.connection.retry.scheduled",
+            Level::Warn,
+            attributes,
+        )?;
+        events
+            .send((
+                generation,
+                Event::Retrying {
+                    attempt: attempt + 1,
+                    delay,
+                },
+            ))
+            .map_err(|_| Error::Protocol("Connection window closed".into()))?;
+        let retry_at = Instant::now() + delay;
+        while !control.cancelled.load(Ordering::Acquire) {
+            let remaining = retry_at.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            thread::sleep(remaining.min(Duration::from_millis(20)));
+        }
+        attempt += 1;
+    }
+}
+
 fn run(
     request: Request,
     incoming: Receiver<WriterCommand>,
@@ -370,54 +477,65 @@ fn run(
         return hevc::run(request, incoming, events, frames, control, counters);
     }
     let generation = request.generation;
-    let credentials = credentials::resolve(
-        request.profile.id,
-        request.credentials,
-        &AuditedConsent {
-            scope: &request.audit,
-            window: request.window,
+    let Some(((mut stream, info), credentials)) = connect_with_retry(
+        &request.audit,
+        events,
+        generation,
+        control,
+        || {
+            credentials::resolve(
+                request.profile.id,
+                request.credentials,
+                &AuditedConsent {
+                    scope: &request.audit,
+                    window: request.window,
+                },
+                &AuditedVault {
+                    scope: &request.audit,
+                },
+            )
         },
-        &AuditedVault {
-            scope: &request.audit,
+        |credentials| {
+            let stream = protocol::connect(&request.profile)?;
+            request.audit.critical("network.connection.established", Level::Info, json!({
+                "server.socket.address": stream.peer_addr()?.ip().to_string(), "server.socket.port": stream.peer_addr()?.port(),
+                "client.socket.address": stream.local_addr()?.ip().to_string(), "client.socket.port": stream.local_addr()?.port(),
+            }))?;
+            *control
+                .socket
+                .lock()
+                .map_err(|_| Error::Protocol("Connection control is unavailable".into()))? =
+                Some(stream.try_clone()?);
+            if control.cancelled.load(Ordering::Acquire) {
+                return Err(Error::Cancelled);
+            }
+            let mut stream = Metered {
+                inner: stream,
+                counters: counters.clone(),
+            };
+            request.audit.critical(
+                "security.authentication.started",
+                Level::Info,
+                json!({"network.protocol.name":"rfb"}),
+            )?;
+            let info = protocol::handshake_with_settings(
+                &mut stream,
+                request.profile.authentication,
+                credentials,
+                request.streaming,
+            )?;
+            request.audit.critical("security.authentication.completed", Level::Info, json!({
+                "event.outcome":"success", "rfb.security.type": if request.profile.authentication == crate::profiles::AuthMode::MacLogin { 30 } else { 2 },
+                "rfb.framebuffer.width": info.size.width, "rfb.framebuffer.height": info.size.height,
+                "rfb.desktop.name": info.name, "network.encrypted": false,
+            }))?;
+            stream.inner.set_read_timeout(None)?;
+            Ok((stream, info))
         },
-    )?;
-    if control.cancelled.load(Ordering::Acquire) {
+    )?
+    else {
         return Ok(());
-    }
-    let stream = protocol::connect(&request.profile)?;
-    request.audit.critical("network.connection.established", Level::Info, json!({
-        "server.socket.address": stream.peer_addr()?.ip().to_string(), "server.socket.port": stream.peer_addr()?.port(),
-        "client.socket.address": stream.local_addr()?.ip().to_string(), "client.socket.port": stream.local_addr()?.port(),
-    }))?;
-    *control
-        .socket
-        .lock()
-        .map_err(|_| Error::Protocol("Connection control is unavailable".into()))? =
-        Some(stream.try_clone()?);
-    if control.cancelled.load(Ordering::Acquire) {
-        return Ok(());
-    }
-    let mut stream = Metered {
-        inner: stream,
-        counters: counters.clone(),
     };
-    request.audit.critical(
-        "security.authentication.started",
-        Level::Info,
-        json!({"network.protocol.name":"rfb"}),
-    )?;
-    let info = protocol::handshake_with_settings(
-        &mut stream,
-        request.profile.authentication,
-        &credentials,
-        request.streaming,
-    )?;
-    request.audit.critical("security.authentication.completed", Level::Info, json!({
-        "event.outcome":"success", "rfb.security.type": if request.profile.authentication == crate::profiles::AuthMode::MacLogin { 30 } else { 2 },
-        "rfb.framebuffer.width": info.size.width, "rfb.framebuffer.height": info.size.height,
-        "rfb.desktop.name": info.name, "network.encrypted": false,
-    }))?;
-    stream.inner.set_read_timeout(None)?;
     let mut profile = request.profile;
     let mut credentials_saved = false;
     if request.remember {
@@ -656,6 +774,232 @@ fn write_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    struct SavedLogin {
+        calls: RefCell<Vec<&'static str>>,
+        approved: bool,
+    }
+
+    impl credentials::ConsentVerifier for SavedLogin {
+        fn verify(&self) -> Result<()> {
+            self.calls.borrow_mut().push("hello");
+            if self.approved {
+                Ok(())
+            } else {
+                Err(Error::Consent("fixture denied".into()))
+            }
+        }
+    }
+
+    impl CredentialStore for SavedLogin {
+        fn load(&self, _: uuid::Uuid) -> Result<Credentials> {
+            self.calls.borrow_mut().push("read");
+            Ok(Credentials::new("fixture".into(), "FixtureOnly".into()))
+        }
+
+        fn save(&self, _: uuid::Uuid, _: &Credentials) -> Result<()> {
+            unreachable!("Startup retries must not save credentials")
+        }
+
+        fn delete(&self, _: uuid::Uuid) -> Result<()> {
+            unreachable!("Startup retries must not delete credentials")
+        }
+    }
+
+    #[test]
+    fn startup_retries_share_one_hello_approval_and_vault_read() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut audit = audit::Audit::start(directory.path().join("audit")).unwrap();
+        let scope = audit.audit().scope(json!({}));
+        let login = SavedLogin {
+            calls: RefCell::new(Vec::new()),
+            approved: true,
+        };
+        let control = Control::new(false);
+        let (events, receiver) = mpsc::channel();
+        let mut attempts = 0;
+        let connection = connect_with_retry(
+            &scope,
+            &events,
+            7,
+            &control,
+            || {
+                credentials::resolve(
+                    uuid::Uuid::new_v4(),
+                    CredentialSource::Saved,
+                    &login,
+                    &login,
+                )
+            },
+            |credentials| {
+                assert_eq!(credentials.username(), "fixture");
+                assert_eq!(credentials.password(), "FixtureOnly");
+                attempts += 1;
+                match attempts {
+                    1 => Err(std::io::Error::from(std::io::ErrorKind::ConnectionReset).into()),
+                    2 => Err(Error::ConnectionLost("No first picture yet".into())),
+                    _ => Ok("connected"),
+                }
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(connection.0, "connected");
+        assert_eq!(attempts, 3);
+        assert_eq!(*login.calls.borrow(), ["hello", "read"]);
+        let progress = receiver
+            .try_iter()
+            .map(|(generation, event)| {
+                assert_eq!(generation, 7);
+                match event {
+                    Event::Retrying { attempt, delay } => (attempt, delay.as_secs()),
+                    _ => panic!("Startup failures must report progress, not an error"),
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(progress, [(2, 1), (2, 0), (3, 2), (3, 0)]);
+        audit.shutdown().unwrap();
+    }
+
+    #[test]
+    fn startup_retries_are_bounded_and_preserve_the_final_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut audit = audit::Audit::start(directory.path().join("audit")).unwrap();
+        let scope = audit.audit().scope(json!({}));
+        let control = Control::new(false);
+        let (events, receiver) = mpsc::channel();
+        let mut attempts = 0;
+        let result = connect_with_retry::<()>(
+            &scope,
+            &events,
+            1,
+            &control,
+            || Ok(Credentials::new("fixture".into(), "FixtureOnly".into())),
+            |_| {
+                attempts += 1;
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionRefused,
+                    format!("fixture attempt {attempts}"),
+                )
+                .into())
+            },
+        );
+        match result {
+            Err(Error::Io(error)) => assert_eq!(error.to_string(), "fixture attempt 4"),
+            _ => panic!("The final startup failure must be returned"),
+        }
+        assert_eq!(attempts, 4);
+        let delays = receiver
+            .try_iter()
+            .filter_map(|(_, event)| match event {
+                Event::Retrying { attempt, delay } if !delay.is_zero() => {
+                    Some((attempt, delay.as_secs()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(delays, [(2, 1), (3, 2), (4, 4)]);
+        audit.shutdown().unwrap();
+    }
+
+    #[test]
+    fn startup_never_retries_denied_consent_or_non_transport_failures() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut audit = audit::Audit::start(directory.path().join("audit")).unwrap();
+        let scope = audit.audit().scope(json!({}));
+        let control = Control::new(false);
+        let (events, receiver) = mpsc::channel();
+        let login = SavedLogin {
+            calls: RefCell::new(Vec::new()),
+            approved: false,
+        };
+        let denied = connect_with_retry::<()>(
+            &scope,
+            &events,
+            1,
+            &control,
+            || {
+                credentials::resolve(
+                    uuid::Uuid::new_v4(),
+                    CredentialSource::Saved,
+                    &login,
+                    &login,
+                )
+            },
+            |_| panic!("Denied consent must not start a connection"),
+        );
+        assert!(matches!(denied, Err(Error::Consent(_))));
+        assert_eq!(*login.calls.borrow(), ["hello"]);
+        for error in [
+            Error::Authentication("fixture rejected".into()),
+            Error::Credential("fixture missing".into()),
+            Error::Audit("fixture audit failed".into()),
+            Error::Protocol("fixture unsupported".into()),
+            Error::Configuration("fixture invalid".into()),
+        ] {
+            let mut failure = Some(error);
+            let mut attempts = 0;
+            let result = connect_with_retry::<()>(
+                &scope,
+                &events,
+                1,
+                &control,
+                || Ok(Credentials::new("fixture".into(), "FixtureOnly".into())),
+                |_| {
+                    attempts += 1;
+                    Err(failure.take().expect("Fatal errors must not be retried"))
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(attempts, 1);
+        }
+        assert_eq!(receiver.try_iter().count(), 0);
+        audit.shutdown().unwrap();
+    }
+
+    #[test]
+    fn cancelling_startup_backoff_prevents_another_attempt() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut audit = audit::Audit::start(directory.path().join("audit")).unwrap();
+        let scope = audit.audit().scope(json!({}));
+        let control = Arc::new(Control::new(false));
+        let worker_control = control.clone();
+        let (events, receiver) = mpsc::channel();
+        let (completed, result) = mpsc::channel();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let worker_attempts = attempts.clone();
+        let worker = thread::spawn(move || {
+            let outcome = connect_with_retry::<()>(
+                &scope,
+                &events,
+                1,
+                &worker_control,
+                || Ok(Credentials::new("fixture".into(), "FixtureOnly".into())),
+                |_| {
+                    worker_attempts.fetch_add(1, Ordering::Relaxed);
+                    Err(std::io::Error::from(std::io::ErrorKind::ConnectionRefused).into())
+                },
+            );
+            completed.send(outcome).unwrap();
+        });
+        assert!(matches!(
+            receiver.recv_timeout(Duration::from_secs(2)).unwrap().1,
+            Event::Retrying { attempt: 2, delay } if delay == Duration::from_secs(1)
+        ));
+        control.close().unwrap();
+        assert!(
+            result
+                .recv_timeout(Duration::from_millis(500))
+                .unwrap()
+                .unwrap()
+                .is_none()
+        );
+        worker.join().unwrap();
+        assert_eq!(attempts.load(Ordering::Relaxed), 1);
+        audit.shutdown().unwrap();
+    }
+
     struct Sink {
         sent: Sender<Vec<u8>>,
     }
